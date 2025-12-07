@@ -13,7 +13,7 @@ void signalHandler(int signo)
 {
     if (signo == SIGINT) 
     {
-        std::cout << "\n[Main] SIGINT received\n";
+        // std::cout은 async-signal-safe하지 않으므로 사용하지 않음
         g_terminate = true;
     }
 }
@@ -40,6 +40,7 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
+    std::cout << "\n[Main] SIGINT received, shutting down...\n";
     server.stop();
     return 0;
 }

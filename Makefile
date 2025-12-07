@@ -6,7 +6,7 @@ LDFLAGS =
 # 디렉토리 설정
 SRC_DIR = src
 BUILD_DIR = build
-TARGET = $(BUILD_DIR)/myapp
+TARGET = $(BUILD_DIR)/my_siplite
 
 # 소스 파일 찾기
 SRCS = $(wildcard $(SRC_DIR)/*.cpp)

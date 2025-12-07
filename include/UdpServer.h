@@ -14,6 +14,12 @@ public:
     UdpServer();
     ~UdpServer();
 
+    // 복사/이동 금지
+    UdpServer(const UdpServer&) = delete;
+    UdpServer& operator=(const UdpServer&) = delete;
+    UdpServer(UdpServer&&) = delete;
+    UdpServer& operator=(UdpServer&&) = delete;
+
     // ip: "0.0.0.0", port: 5060, workerCount: 워커 스레드 수
     bool start(const std::string& ip, uint16_t port, std::size_t workerCount);
     void stop();
@@ -25,7 +31,7 @@ private:
     void handlePacket(std::size_t workerId, const UdpPacket& pkt);
 
 private:
-    int sock_;
+    std::atomic<int> sock_;
     std::atomic<bool> running_;
     std::thread recvThread_;
     std::vector<std::thread> workerThreads_;

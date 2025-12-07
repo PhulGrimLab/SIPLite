@@ -8,11 +8,30 @@ template <typename T>
 class ConcurrentQueue 
 {
 public:
+    ConcurrentQueue() = default;
+    ~ConcurrentQueue() = default;
+
+    // 복사/이동 금지
+    ConcurrentQueue(const ConcurrentQueue&) = delete;
+    ConcurrentQueue& operator=(const ConcurrentQueue&) = delete;
+    ConcurrentQueue(ConcurrentQueue&&) = delete;
+    ConcurrentQueue& operator=(ConcurrentQueue&&) = delete;
+
     void push(const T& value) 
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             queue_.push(value);
+        }
+        cv_.notify_one();
+    }
+
+    // move 버전
+    void push(T&& value) 
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_.push(std::move(value));
         }
         cv_.notify_one();
     }
@@ -44,12 +63,13 @@ public:
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (shutdown_) return;  // 이미 shutdown 됨
             shutdown_ = true;
         }
         cv_.notify_all();
     }
 
-    bool empty() 
+    bool empty() noexcept
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.empty();

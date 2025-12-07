@@ -9,6 +9,12 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <mutex>
+
+namespace {
+    std::mutex g_logMutex;
+    constexpr std::size_t RECV_BUFFER_SIZE = 2048;  // UDP 수신 버퍼 크기
+}
 
 UdpServer::UdpServer()
     : sock_(-1), running_(false) {}
@@ -43,18 +49,21 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
 
 void UdpServer::stop() 
 {
-    if (!running_) return;
-
-    running_ = false;
+    // Race condition 방지: atomic compare_exchange 사용
+    bool expected = true;
+    if (!running_.compare_exchange_strong(expected, false)) 
+    {
+        return;  // 이미 중지됨
+    }
 
     // 워커에게 shutdown 알림
     queue_.shutdown();
 
-    // 수신 스레드 깨우기 위해 소켓 닫기
-    if (sock_ >= 0)
+    // 수신 스레드 깨우기 위해 소켓 닫기 (double-close 방지)
+    int sock = sock_.exchange(-1);
+    if (sock >= 0)
     {
-        ::close(sock_);
-        sock_ = -1;
+        ::close(sock);
     }
 
     if (recvThread_.joinable()) 
@@ -131,12 +140,16 @@ void UdpServer::recvLoop()
 
     while (running_) 
     {
-        char buf[4096];
+        // 소켓 유효성 검사
+        int currentSock = sock_.load();
+        if (currentSock < 0) break;
+
+        char buf[RECV_BUFFER_SIZE];
         sockaddr_in src;
         socklen_t srclen = sizeof(src);
         std::memset(&src, 0, sizeof(src));
 
-        ssize_t n = ::recvfrom(sock_, buf, sizeof(buf) - 1, 0,
+        ssize_t n = ::recvfrom(currentSock, buf, sizeof(buf) - 1, 0,
                                reinterpret_cast<sockaddr*>(&src), &srclen);
         if (n < 0) 
         {
@@ -151,13 +164,17 @@ void UdpServer::recvLoop()
 
         buf[n] = '\0';
 
+        // inet_ntop 사용 (thread-safe)
+        char ipStr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &src.sin_addr, ipStr, sizeof(ipStr));
+
         UdpPacket pkt;
-        pkt.remoteIp   = inet_ntoa(src.sin_addr);
+        pkt.remoteIp   = ipStr;
         pkt.remotePort = ntohs(src.sin_port);
         pkt.data.assign(buf, static_cast<std::size_t>(n));
 
-        // 큐에 넣기
-        queue_.push(pkt);
+        // 큐에 넣기 (move semantics 사용)
+        queue_.push(std::move(pkt));
     }
 
     std::cout << "[RecvLoop] ended\n";
@@ -184,7 +201,8 @@ void UdpServer::workerLoop(std::size_t workerId)
 
 void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt) 
 {
-    // 현재는 단순 로그 출력만
+    // 로그 출력 시 mutex 보호 (스레드 간 출력 섞임 방지)
+    std::lock_guard<std::mutex> lock(g_logMutex);
     std::cout << "------------------------------------------\n";
     std::cout << "[Worker " << workerId << "] from "
               << pkt.remoteIp << ":" << pkt.remotePort << "\n";
