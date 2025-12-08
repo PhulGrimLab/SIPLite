@@ -16,6 +16,7 @@ namespace {
     constexpr std::size_t RECV_BUFFER_SIZE = 2048;  // UDP 수신 버퍼 크기
 }
 
+// sock_ = -1 일 때 소켓 닫힌 상태, running_ = false 일 때 서버 중지 상태
 UdpServer::UdpServer()
     : sock_(-1), running_(false) {}
 
@@ -145,7 +146,7 @@ void UdpServer::recvLoop()
         if (currentSock < 0) break;
 
         char buf[RECV_BUFFER_SIZE];
-        sockaddr_in src;
+        sockaddr_in src;        // 송신자 주소 저장용
         socklen_t srclen = sizeof(src);
         std::memset(&src, 0, sizeof(src));
 
