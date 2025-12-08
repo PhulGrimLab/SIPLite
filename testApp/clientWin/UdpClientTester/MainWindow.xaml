@@ -5,8 +5,139 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:UdpClientTester"
         mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
+        Title="UDP Server Load Tester"
+        Height="700" Width="900"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
+        <!-- 서버 설정 -->
+        <GroupBox Grid.Row="0" Header="서버 설정" Margin="0,0,0,10">
+            <Grid Margin="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="100"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="서버 주소:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <TextBox Grid.Column="1" x:Name="txtServerAddress" Text="127.0.0.1" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="2" Text="포트:" VerticalAlignment="Center" Margin="20,0,10,0"/>
+                <TextBox Grid.Column="3" x:Name="txtPort" Text="5060" VerticalAlignment="Center"/>
+            </Grid>
+        </GroupBox>
+
+        <!-- 테스트 설정 -->
+        <GroupBox Grid.Row="1" Header="테스트 설정" Margin="0,0,0,10">
+            <Grid Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="패킷 크기(bytes):" VerticalAlignment="Center" Margin="0,0,10,5"/>
+                <TextBox Grid.Row="0" Grid.Column="1" x:Name="txtPacketSize" Text="64" VerticalAlignment="Center" Margin="0,0,20,5"/>
+                
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="전송 횟수:" VerticalAlignment="Center" Margin="0,0,10,5"/>
+                <TextBox Grid.Row="0" Grid.Column="3" x:Name="txtSendCount" Text="100" VerticalAlignment="Center" Margin="0,0,20,5"/>
+                
+                <TextBlock Grid.Row="0" Grid.Column="4" Text="전송 간격(ms):" VerticalAlignment="Center" Margin="0,0,10,5"/>
+                <TextBox Grid.Row="0" Grid.Column="5" x:Name="txtInterval" Text="10" VerticalAlignment="Center" Margin="0,0,0,5"/>
+
+                <CheckBox Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" x:Name="chkContinuous" Content="지속적 전송" VerticalAlignment="Center" Margin="0,5,0,0"/>
+                <TextBlock Grid.Row="1" Grid.Column="2" Text="타임아웃(ms):" VerticalAlignment="Center" Margin="0,5,10,0"/>
+                <TextBox Grid.Row="1" Grid.Column="3" x:Name="txtTimeout" Text="1000" VerticalAlignment="Center" Margin="0,5,0,0"/>
+            </Grid>
+        </GroupBox>
+
+        <!-- 컨트롤 버튼 -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button x:Name="btnStart" Content="테스트 시작" Width="120" Height="35" Click="btnStart_Click" Margin="0,0,10,0"/>
+            <Button x:Name="btnStop" Content="테스트 중지" Width="120" Height="35" Click="btnStop_Click" IsEnabled="False" Margin="0,0,10,0"/>
+            <Button x:Name="btnClear" Content="로그 지우기" Width="120" Height="35" Click="btnClear_Click"/>
+        </StackPanel>
+
+        <!-- 결과 표시 -->
+        <GroupBox Grid.Row="3" Header="테스트 결과">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- 통계 정보 -->
+                <Grid Grid.Row="0" Margin="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    
+                    <StackPanel Grid.Column="0">
+                        <TextBlock Text="전송 패킷" FontWeight="Bold" HorizontalAlignment="Center"/>
+                        <TextBlock x:Name="txtSentCount" Text="0" FontSize="20" HorizontalAlignment="Center" Foreground="Blue"/>
+                    </StackPanel>
+                    
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="수신 패킷" FontWeight="Bold" HorizontalAlignment="Center"/>
+                        <TextBlock x:Name="txtReceivedCount" Text="0" FontSize="20" HorizontalAlignment="Center" Foreground="Green"/>
+                    </StackPanel>
+                    
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="실패/타임아웃" FontWeight="Bold" HorizontalAlignment="Center"/>
+                        <TextBlock x:Name="txtFailedCount" Text="0" FontSize="20" HorizontalAlignment="Center" Foreground="Red"/>
+                    </StackPanel>
+                    
+                    <StackPanel Grid.Column="3">
+                        <TextBlock Text="평균 RTT (ms)" FontWeight="Bold" HorizontalAlignment="Center"/>
+                        <TextBlock x:Name="txtAvgRtt" Text="0.00" FontSize="20" HorizontalAlignment="Center" Foreground="Orange"/>
+                    </StackPanel>
+                    
+                    <StackPanel Grid.Column="4">
+                        <TextBlock Text="성공률 (%)" FontWeight="Bold" HorizontalAlignment="Center"/>
+                        <TextBlock x:Name="txtSuccessRate" Text="0.00" FontSize="20" HorizontalAlignment="Center" Foreground="Purple"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- 로그 리스트 -->
+                <ListView Grid.Row="1" x:Name="lvResults" Margin="10">
+                    <ListView.View>
+                        <GridView>
+                            <GridViewColumn Header="#" Width="50" DisplayMemberBinding="{Binding Index}"/>
+                            <GridViewColumn Header="전송 시간" Width="100" DisplayMemberBinding="{Binding SendTime}"/>
+                            <GridViewColumn Header="수신 시간" Width="100" DisplayMemberBinding="{Binding ReceiveTime}"/>
+                            <GridViewColumn Header="RTT (ms)" Width="80" DisplayMemberBinding="{Binding RoundTripTime}"/>
+                            <GridViewColumn Header="패킷 일치" Width="80" DisplayMemberBinding="{Binding IsMatch}"/>
+                            <GridViewColumn Header="상태" Width="100" DisplayMemberBinding="{Binding Status}"/>
+                            <GridViewColumn Header="패킷 데이터" Width="250" DisplayMemberBinding="{Binding PacketPreview}"/>
+                        </GridView>
+                    </ListView.View>
+                </ListView>
+            </Grid>
+        </GroupBox>
+
+        <!-- 상태바 -->
+        <StatusBar Grid.Row="4">
+            <StatusBarItem>
+                <TextBlock x:Name="txtStatus" Text="준비"/>
+            </StatusBarItem>
+        </StatusBar>
     </Grid>
 </Window>
