@@ -69,7 +69,7 @@ public:
         cv_.notify_all();
     }
 
-    bool empty() noexcept
+    bool empty()
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.empty();

@@ -24,6 +24,9 @@ public:
     bool start(const std::string& ip, uint16_t port, std::size_t workerCount);
     void stop();
 
+    // 클라이언트에게 데이터 전송
+    bool sendTo(const std::string& ip, uint16_t port, const std::string& data);
+
 private:
     bool bindSocket(const std::string& ip, uint16_t port);
     void recvLoop();

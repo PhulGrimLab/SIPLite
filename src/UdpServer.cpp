@@ -27,12 +27,19 @@ UdpServer::~UdpServer()
 
 bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCount) 
 {
-    if (!bindSocket(ip, port)) 
+    // 이미 실행 중인지 확인
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true)) 
     {
+        std::cerr << "[UdpServer] Already running\n";
         return false;
     }
 
-    running_ = true;
+    if (!bindSocket(ip, port)) 
+    {
+        running_ = false;  // 실패 시 플래그 복원
+        return false;
+    }
 
     // 수신 스레드
     recvThread_ = std::thread(&UdpServer::recvLoop, this);
@@ -126,8 +133,11 @@ bool UdpServer::bindSocket(const std::string& ip, uint16_t port)
     if (::bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) 
     {
         perror("bind");
-        ::close(sock_);
-        sock_ = -1;
+        int sock = sock_.exchange(-1);
+        if (sock >= 0) 
+        {
+            ::close(sock);
+        }
         return false;
     }
 
@@ -203,13 +213,56 @@ void UdpServer::workerLoop(std::size_t workerId)
 void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt) 
 {
     // 로그 출력 시 mutex 보호 (스레드 간 출력 섞임 방지)
-    std::lock_guard<std::mutex> lock(g_logMutex);
-    std::cout << "------------------------------------------\n";
-    std::cout << "[Worker " << workerId << "] from "
-              << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-    std::cout << pkt.data << "\n";
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cout << "------------------------------------------\n";
+        std::cout << "[Worker " << workerId << "] from "
+                << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+        std::cout << pkt.data << "\n";
+    }
 
-    // 나중에 여기서:
-    //  - SIP 파서 붙이고
-    //  - REGISTER/INVITE 처리로 넘기면 됨
+    // 에코: 받은 데이터를 다시 클라이언트로 전송
+    if (sendTo(pkt.remoteIp, pkt.remotePort, pkt.data)) 
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cout << "[Worker " << workerId << "] Echo sent to "
+                  << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+    } 
+    else 
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cout << "[Worker " << workerId << "] Echo failed to"
+                  << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+    }
+}
+
+bool UdpServer::sendTo(const std::string& ip, uint16_t port, const std::string& data) 
+{
+    int currentSock = sock_.load();
+    if (currentSock < 0) 
+    {
+        return false;  // 소켓이 닫힌 상태
+    }
+
+    sockaddr_in dest;
+    std::memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port   = htons(port);
+    
+    if (inet_pton(AF_INET, ip.c_str(), &dest.sin_addr) <= 0) 
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cerr << "[UdpServer] Invalid IP address: " << ip << "\n";
+        return false;
+    }
+
+    ssize_t sent = ::sendto(currentSock, data.data(), data.size(), 0,
+                         reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+    if (sent < 0) 
+    {
+        perror("sendto");
+        return false;
+    }
+
+    return static_cast<std::size_t>(sent) == data.size();
 }
