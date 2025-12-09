@@ -14,6 +14,23 @@
 namespace {
     std::mutex g_logMutex;
     constexpr std::size_t RECV_BUFFER_SIZE = 2048;  // UDP 수신 버퍼 크기
+    
+    // 스레드 안전한 에러 로깅 (perror 대체)
+    void logError(const char* prefix) {
+        int savedErrno = errno;  // errno를 즉시 캡처
+        char buf[256];
+        // strerror_r의 GNU 버전과 XSI 버전 모두 처리
+        #if (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200112L) && !defined(_GNU_SOURCE)
+        if (strerror_r(savedErrno, buf, sizeof(buf)) == 0) {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            std::cerr << prefix << ": " << buf << " (errno=" << savedErrno << ")\n";
+        }
+        #else
+        char* result = strerror_r(savedErrno, buf, sizeof(buf));
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cerr << prefix << ": " << result << " (errno=" << savedErrno << ")\n";
+        #endif
+    }
 }
 
 // sock_ = -1 일 때 소켓 닫힌 상태, running_ = false 일 때 서버 중지 상태
@@ -34,6 +51,9 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
         std::cerr << "[UdpServer] Already running\n";
         return false;
     }
+
+    // 이전 shutdown 상태 초기화 (재시작 지원)
+    queue_.reset();
 
     if (!bindSocket(ip, port)) 
     {
@@ -98,21 +118,21 @@ bool UdpServer::bindSocket(const std::string& ip, uint16_t port)
 
     if (sock_ < 0) 
     {
-        perror("socket");
+        logError("socket");
         return false;
     }
 
     int reuse = 1;
     if (::setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) 
     {
-        perror("setsockopt(SO_REUSEADDR)");
+        logError("setsockopt(SO_REUSEADDR)");
     }
 
     // 수신 버퍼 크게 (예: 4MB)
     int rcvbuf = 4 * 1024 * 1024;
     if (::setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) 
     {
-        perror("setsockopt(SO_RCVBUF)");
+        logError("setsockopt(SO_RCVBUF)");
     }
 
     // 수신 타임아웃 설정 (500ms) - 종료 시 recvfrom 블로킹 해제용
@@ -121,18 +141,30 @@ bool UdpServer::bindSocket(const std::string& ip, uint16_t port)
     tv.tv_usec = 500000;  // 500ms
     if (::setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) 
     {
-        perror("setsockopt(SO_RCVTIMEO)");
+        logError("setsockopt(SO_RCVTIMEO)");
     }
 
     sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(port);
-    addr.sin_addr.s_addr = inet_addr(ip.c_str());
+    
+    // inet_pton 사용 (inet_addr보다 안전 - 오류 처리 가능)
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cerr << "[UdpServer] Invalid bind IP address: " << ip << "\n";
+        int sock = sock_.exchange(-1);
+        if (sock >= 0)
+        {
+            ::close(sock);
+        }
+        return false;
+    }
 
     if (::bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) 
     {
-        perror("bind");
+        logError("bind");
         int sock = sock_.exchange(-1);
         if (sock >= 0) 
         {
@@ -169,7 +201,7 @@ void UdpServer::recvLoop()
                 // 타임아웃 - running_ 체크 후 계속
                 continue;
             }
-            perror("recvfrom");
+            logError("recvfrom");
             continue;
         }
 
@@ -185,7 +217,13 @@ void UdpServer::recvLoop()
         pkt.data.assign(buf, static_cast<std::size_t>(n));
 
         // 큐에 넣기 (move semantics 사용)
-        queue_.push(std::move(pkt));
+        if (!queue_.push(std::move(pkt)))
+        {
+            // 큐가 가득 찼거나 shutdown 상태 - 패킷 버림
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            std::cerr << "[RecvLoop] Queue full or shutdown, packet dropped from "
+                      << ipStr << ":" << ntohs(src.sin_port) << "\n";
+        }
     }
 
     std::cout << "[RecvLoop] ended\n";
@@ -294,7 +332,7 @@ bool UdpServer::sendTo(const std::string& ip, uint16_t port, const std::string& 
                          reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
     if (sent < 0) 
     {
-        perror("sendto");
+        logError("sendto");
         return false;
     }
 

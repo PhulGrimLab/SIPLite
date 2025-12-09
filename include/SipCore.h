@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <random>
 #include <vector>
+#include <optional>
+#include <thread>  // for std::this_thread::get_id()
 
 // ================================
 // 0) 보안 상수 정의
@@ -26,6 +28,8 @@ namespace SipConstants
     constexpr std::size_t MAX_HEADERS_COUNT = 100;         // 최대 헤더 개수
     constexpr int MAX_EXPIRES_SEC = 7200;                  // 최대 등록 유효 시간 (2시간)
     constexpr int DEFAULT_EXPIRES_SEC = 3600;              // 기본 등록 유효 시간 (1시간)
+    constexpr std::size_t MAX_REGISTRATIONS = 10000;       // 최대 등록 개수
+    constexpr std::size_t MAX_ACTIVE_CALLS = 5000;         // 최대 활성 통화 개수
 }
 
 // ================================
@@ -116,13 +120,13 @@ inline std::string toLower(const std::string& s)
     return out;
 }
 
-inline const std::string& getHeader(const SipMessage& msg, const std::string& name) 
+// 헤더 값 조회 - 값으로 반환 (dangling reference 방지)
+inline std::string getHeader(const SipMessage& msg, const std::string& name) 
 {
-    static const std::string empty;
     auto it = msg.headers.find(toLower(name));
     if (it == msg.headers.end()) 
     {
-        return empty;
+        return std::string{};
     }
 
     return it->second;
@@ -430,6 +434,9 @@ public:
     }
 
     // Registration 조회
+    // WARNING: 반환된 포인터는 락 해제 후 무효화될 수 있음
+    // 가능하면 findRegistrationSafe() 사용 권장
+    [[deprecated("Use findRegistrationSafe() instead for thread safety")]]
     const Registration* findRegistration(const std::string& aor) const
     {
         std::lock_guard<std::mutex> lock(regMutex_);
@@ -457,6 +464,9 @@ public:
         bool confirmed = false;
     };
 
+    // WARNING: 반환된 포인터는 락 해제 후 무효화될 수 있음
+    // 가능하면 findCallSafe() 사용 권장
+    [[deprecated("Use findCallSafe() instead for thread safety")]]
     const ActiveCall* findCall(const std::string& callId) const
     {
         std::lock_guard<std::mutex> lock(callMutex_);
@@ -468,14 +478,110 @@ public:
         return nullptr;
     }
 
+    // ================================
+    // 안전한 조회 함수 (복사본 반환)
+    // ================================
+    
+    std::optional<Registration> findRegistrationSafe(const std::string& aor) const
+    {
+        std::lock_guard<std::mutex> lock(regMutex_);
+        auto it = regs_.find(aor);
+        if (it != regs_.end())
+        {
+            return it->second;  // 복사본 반환
+        }
+        return std::nullopt;
+    }
+
+    std::optional<ActiveCall> findCallSafe(const std::string& callId) const
+    {
+        std::lock_guard<std::mutex> lock(callMutex_);
+        auto it = activeCalls_.find(callId);
+        if (it != activeCalls_.end())
+        {
+            return it->second;  // 복사본 반환
+        }
+        return std::nullopt;
+    }
+
+    // ================================
+    // 만료된 등록 정보 정리 (주기적 호출 필요)
+    // ================================
+    
+    std::size_t cleanupExpiredRegistrations()
+    {
+        std::lock_guard<std::mutex> lock(regMutex_);
+        auto now = std::chrono::steady_clock::now();
+        std::size_t removed = 0;
+        
+        for (auto it = regs_.begin(); it != regs_.end(); )
+        {
+            if (it->second.expiresAt <= now)
+            {
+                it = regs_.erase(it);
+                ++removed;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        
+        return removed;
+    }
+
+    // ================================
+    // 오래된 미확립 통화 정리 (주기적 호출 필요)
+    // ================================
+    
+    std::size_t cleanupStaleCalls(std::chrono::seconds maxAge = std::chrono::seconds(300))
+    {
+        std::lock_guard<std::mutex> lock(callMutex_);
+        auto now = std::chrono::steady_clock::now();
+        std::size_t removed = 0;
+        
+        for (auto it = activeCalls_.begin(); it != activeCalls_.end(); )
+        {
+            // 미확립 통화가 maxAge(기본 5분) 이상 경과하면 정리
+            if (!it->second.confirmed)
+            {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - it->second.startTime);
+                if (elapsed > maxAge)
+                {
+                    it = activeCalls_.erase(it);
+                    ++removed;
+                    continue;
+                }
+            }
+            ++it;
+        }
+        
+        return removed;
+    }
+
+    // 등록된 사용자 수 조회
+    std::size_t registrationCount() const
+    {
+        std::lock_guard<std::mutex> lock(regMutex_);
+        return regs_.size();
+    }
+
+    // 활성 통화 수 조회
+    std::size_t activeCallCount() const
+    {
+        std::lock_guard<std::mutex> lock(callMutex_);
+        return activeCalls_.size();
+    }
+
 private:
     bool handleRegister(const UdpPacket& pkt,
                         const SipMessage& msg,
                         std::string& outResponse)
     {
-        // 필수 헤더들
-        const std::string& toHdr      = getHeader(msg, "to");
-        const std::string& contactHdr = getHeader(msg, "contact");
+        // 필수 헤더들 (getHeader는 값을 반환하므로 직접 std::string으로 받음)
+        std::string toHdr      = getHeader(msg, "to");
+        std::string contactHdr = getHeader(msg, "contact");
 
         if (toHdr.empty() || contactHdr.empty()) 
         {
@@ -494,7 +600,7 @@ private:
 
         // Expires (헤더 기준, 없으면 디폴트 3600sec)
         int expiresSec = SipConstants::DEFAULT_EXPIRES_SEC;
-        const std::string& expHdr = getHeader(msg, "expires");
+        std::string expHdr = getHeader(msg, "expires");
         if (!expHdr.empty()) 
         {
             try 
@@ -527,6 +633,13 @@ private:
 
         {
             std::lock_guard<std::mutex> lock(regMutex_);
+            // 기존 등록이 아닌 경우 개수 제한 검사
+            auto it = regs_.find(aor);
+            if (it == regs_.end() && regs_.size() >= SipConstants::MAX_REGISTRATIONS)
+            {
+                outResponse = buildSimpleResponse(msg, 503, "Service Unavailable");
+                return true;
+            }
             regs_[aor] = reg;
         }
 
@@ -543,11 +656,11 @@ private:
                       const SipMessage& msg,
                       std::string& outResponse)
     {
-        const std::string& toHdr     = getHeader(msg, "to");
-        const std::string& fromHdr   = getHeader(msg, "from");
-        const std::string& callId    = getHeader(msg, "call-id");
+        std::string toHdr     = getHeader(msg, "to");
+        std::string fromHdr   = getHeader(msg, "from");
+        std::string callId    = getHeader(msg, "call-id");
         // contactHdr는 향후 사용 예정
-        // const std::string& contactHdr = getHeader(msg, "contact");
+        // std::string contactHdr = getHeader(msg, "contact");
 
         if (toHdr.empty() || fromHdr.empty() || callId.empty())
         {
@@ -562,7 +675,8 @@ private:
 
         // 등록된 사용자 찾기
         std::string targetAor = toUri;
-        const Registration* reg = nullptr;
+        Registration regCopy;  // 포인터 대신 복사본 사용 (스레드 안전성)
+        bool found = false;
         
         {
             std::lock_guard<std::mutex> lock(regMutex_);
@@ -572,20 +686,22 @@ private:
                 // 만료 시간 확인
                 if (it->second.expiresAt > std::chrono::steady_clock::now())
                 {
-                    reg = &it->second;
+                    regCopy = it->second;  // 복사 후 락 해제
+                    found = true;
                 }
             }
         }
 
-        if (!reg)
+        if (!found)
         {
             // 사용자를 찾을 수 없음
             outResponse = buildSimpleResponse(msg, 404, "Not Found");
             return true;
         }
 
-        // 먼저 100 Trying 응답 (발신자에게)
-        std::string trying = buildSimpleResponse(msg, 100, "Trying");
+        // 100 Trying 응답 (실제 프로덕션에서는 발신자에게 먼저 전송)
+        // std::string trying = buildSimpleResponse(msg, 100, "Trying");
+        // sendTo(pkt.remoteIp, pkt.remotePort, trying);  // TODO: sendTo 콜백 필요
 
         // 활성 통화 등록
         std::string fromTag = extractTagFromHeader(fromHdr);
@@ -593,6 +709,13 @@ private:
 
         {
             std::lock_guard<std::mutex> lock(callMutex_);
+            // 기존 통화가 아닌 경우 개수 제한 검사
+            auto existingIt = activeCalls_.find(callId);
+            if (existingIt == activeCalls_.end() && activeCalls_.size() >= SipConstants::MAX_ACTIVE_CALLS)
+            {
+                outResponse = buildSimpleResponse(msg, 503, "Service Unavailable");
+                return true;
+            }
             ActiveCall call;
             call.callId = callId;
             call.fromUri = extractUriFromHeader(fromHdr);
@@ -601,8 +724,8 @@ private:
             call.toTag = toTag;
             call.callerIp = pkt.remoteIp;
             call.callerPort = pkt.remotePort;
-            call.calleeIp = reg->ip;
-            call.calleePort = reg->port;
+            call.calleeIp = regCopy.ip;
+            call.calleePort = regCopy.port;
             call.startTime = std::chrono::steady_clock::now();
             call.confirmed = false;
             activeCalls_[callId] = call;
@@ -628,7 +751,7 @@ private:
     {
         (void)pkt;  // unused
         
-        const std::string& callId = getHeader(msg, "call-id");
+        std::string callId = getHeader(msg, "call-id");
         
         if (callId.empty())
         {
@@ -660,7 +783,7 @@ private:
     {
         (void)pkt;
         
-        const std::string& callId = getHeader(msg, "call-id");
+        std::string callId = getHeader(msg, "call-id");
         
         if (callId.empty())
         {
@@ -695,7 +818,7 @@ private:
     {
         (void)pkt;
         
-        const std::string& callId = getHeader(msg, "call-id");
+        std::string callId = getHeader(msg, "call-id");
         
         if (callId.empty())
         {
@@ -734,11 +857,11 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 200 OK\r\n";
 
-        const std::string& via     = getHeader(msg, "via");
-        const std::string& from    = getHeader(msg, "from");
-        const std::string& to      = getHeader(msg, "to");
-        const std::string& callId  = getHeader(msg, "call-id");
-        const std::string& cseq    = getHeader(msg, "cseq");
+        std::string via     = getHeader(msg, "via");
+        std::string from    = getHeader(msg, "from");
+        std::string to      = getHeader(msg, "to");
+        std::string callId  = getHeader(msg, "call-id");
+        std::string cseq    = getHeader(msg, "cseq");
 
         if (!via.empty())    oss << "Via: "     << via    << "\r\n";
         if (!from.empty())   oss << "From: "    << from   << "\r\n";
@@ -762,6 +885,12 @@ private:
     
     std::string extractTagFromHeader(const std::string& header) const
     {
+        // 입력 검증
+        if (header.empty() || header.size() > SipConstants::MAX_HEADER_SIZE)
+        {
+            return "";
+        }
+        
         std::size_t tagPos = header.find("tag=");
         if (tagPos == std::string::npos) 
         {
@@ -769,20 +898,48 @@ private:
         }
         
         std::size_t start = tagPos + 4;
+        if (start >= header.size())
+        {
+            return "";
+        }
+        
         std::size_t end = header.find_first_of(";,\r\n ", start);
         
+        std::string tag;
         if (end == std::string::npos) 
         {
-            return header.substr(start);
+            tag = header.substr(start);
         }
-        return header.substr(start, end - start);
+        else
+        {
+            tag = header.substr(start, end - start);
+        }
+        
+        // Tag 길이 검증
+        if (tag.size() > 128)
+        {
+            return "";
+        }
+        
+        return tag;
     }
     
     std::string generateTag() const
     {
-        static std::random_device rd;
-        static std::mt19937 gen(rd());
-        static std::uniform_int_distribution<uint32_t> dis;
+        // 더 나은 시드 생성: 시간 + 스레드 ID 조합
+        static thread_local std::mt19937 gen([]() -> std::mt19937::result_type {
+            std::random_device rd;
+            try {
+                return static_cast<std::mt19937::result_type>(rd());
+            } catch (...) {
+                // random_device 실패 시 시간 기반 시드 사용
+                auto seed = static_cast<std::mt19937::result_type>(
+                    std::chrono::steady_clock::now().time_since_epoch().count() ^
+                    std::hash<std::thread::id>{}(std::this_thread::get_id()));
+                return seed;
+            }
+        }());
+        static thread_local std::uniform_int_distribution<uint32_t> dis;
         
         std::ostringstream oss;
         oss << std::hex << dis(gen);
@@ -798,11 +955,11 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 " << code << " " << reason << "\r\n";
 
-        const std::string& via     = getHeader(req, "via");
-        const std::string& from    = getHeader(req, "from");
-        const std::string& to      = getHeader(req, "to");
-        const std::string& callId  = getHeader(req, "call-id");
-        const std::string& cseq    = getHeader(req, "cseq");
+        std::string via     = getHeader(req, "via");
+        std::string from    = getHeader(req, "from");
+        std::string to      = getHeader(req, "to");
+        std::string callId  = getHeader(req, "call-id");
+        std::string cseq    = getHeader(req, "cseq");
 
         if (!via.empty())    oss << "Via: "     << via    << "\r\n";
         if (!from.empty())   oss << "From: "    << from   << "\r\n";
@@ -859,11 +1016,11 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 " << code << " " << reason << "\r\n";
 
-        const std::string& via     = getHeader(req, "via");
-        const std::string& from    = getHeader(req, "from");
-        const std::string& to      = getHeader(req, "to");
-        const std::string& callId  = getHeader(req, "call-id");
-        const std::string& cseq    = getHeader(req, "cseq");
+        std::string via     = getHeader(req, "via");
+        std::string from    = getHeader(req, "from");
+        std::string to      = getHeader(req, "to");
+        std::string callId  = getHeader(req, "call-id");
+        std::string cseq    = getHeader(req, "cseq");
 
         if (!via.empty())    oss << "Via: "     << via    << "\r\n";
         if (!from.empty())   oss << "From: "    << from   << "\r\n";
@@ -882,12 +1039,12 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 200 OK\r\n";
 
-        const std::string& via     = getHeader(req, "via");
-        const std::string& from    = getHeader(req, "from");
-        const std::string& to      = getHeader(req, "to");
-        const std::string& callId  = getHeader(req, "call-id");
-        const std::string& cseq    = getHeader(req, "cseq");
-        const std::string& contact = getHeader(req, "contact");
+        std::string via     = getHeader(req, "via");
+        std::string from    = getHeader(req, "from");
+        std::string to      = getHeader(req, "to");
+        std::string callId  = getHeader(req, "call-id");
+        std::string cseq    = getHeader(req, "cseq");
+        std::string contact = getHeader(req, "contact");
 
         if (!via.empty())     oss << "Via: "     << via                 << "\r\n";
         if (!from.empty())    oss << "From: "    << from                << "\r\n";

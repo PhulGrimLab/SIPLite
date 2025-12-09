@@ -3,6 +3,8 @@
 #include <string>
 #include <chrono>
 #include <map>
+#include <vector>
+#include <cstdint>
 
 // ================================
 // SIP 다이얼로그 상태 (RFC 3261)
@@ -64,7 +66,14 @@ struct DialogIdHash
 class SipDialog 
 {
 public:
-    SipDialog() = default;
+    SipDialog()
+        : state_(DialogState::Early)
+        , isUac_(false)
+        , localCSeq_(1)
+        , remoteCSeq_(0)
+        , remotePort_(0)
+        , createdAt_(std::chrono::steady_clock::now())
+    {}
     
     SipDialog(const DialogId& id, bool isUac)
         : id_(id)
@@ -72,6 +81,7 @@ public:
         , isUac_(isUac)
         , localCSeq_(1)
         , remoteCSeq_(0)
+        , remotePort_(0)
         , createdAt_(std::chrono::steady_clock::now())
     {}
     
@@ -94,17 +104,56 @@ public:
     // CSeq 관리
     uint32_t localCSeq() const { return localCSeq_; }
     uint32_t remoteCSeq() const { return remoteCSeq_; }
-    uint32_t nextLocalCSeq() { return ++localCSeq_; }
-    void setRemoteCSeq(uint32_t cseq) { remoteCSeq_ = cseq; }
+    // CSeq 증가 (오버플로우 시 1로 wrap around - RFC 3261 허용)
+    // 반환값: 새 CSeq, 0이면 오버플로우 발생 (특별 처리 필요)
+    uint32_t nextLocalCSeq() 
+    { 
+        if (localCSeq_ < UINT32_MAX) {
+            return ++localCSeq_;
+        }
+        // 오버플로우: 1로 리셋 (0은 유효하지 않음)
+        localCSeq_ = 1;
+        return localCSeq_;
+    }
+    
+    // CSeq 오버플로우 체크
+    bool isCSeqNearOverflow() const
+    {
+        return localCSeq_ > (UINT32_MAX - 1000);  // 1000개 여유
+    }
+    void setRemoteCSeq(uint32_t cseq) 
+    { 
+        // CSeq는 증가만 허용 (replay attack 방지)
+        if (cseq > remoteCSeq_) {
+            remoteCSeq_ = cseq;
+        }
+    }
     
     // 원격 타겟 (Contact 헤더에서 추출)
     const std::string& remoteTarget() const { return remoteTarget_; }
     void setRemoteTarget(const std::string& target) { remoteTarget_ = target; }
     
     // Route Set (Record-Route 헤더들)
+    static constexpr std::size_t MAX_ROUTE_SET_SIZE = 20;  // RFC 3261 권장 최대값
+    
     const std::vector<std::string>& routeSet() const { return routeSet_; }
-    void setRouteSet(const std::vector<std::string>& routes) { routeSet_ = routes; }
-    void addRoute(const std::string& route) { routeSet_.push_back(route); }
+    void setRouteSet(const std::vector<std::string>& routes) 
+    { 
+        // 크기 제한
+        if (routes.size() <= MAX_ROUTE_SET_SIZE) {
+            routeSet_ = routes;
+        } else {
+            routeSet_.assign(routes.begin(), routes.begin() + MAX_ROUTE_SET_SIZE);
+        }
+    }
+    bool addRoute(const std::string& route) 
+    { 
+        if (routeSet_.size() >= MAX_ROUTE_SET_SIZE) {
+            return false;  // 최대 개수 초과
+        }
+        routeSet_.push_back(route); 
+        return true;
+    }
     
     // 로컬/원격 URI
     const std::string& localUri() const { return localUri_; }
@@ -132,11 +181,11 @@ public:
 
 private:
     DialogId id_;
-    DialogState state_ = DialogState::Early;
-    bool isUac_ = false;    // true: 클라이언트, false: 서버
+    DialogState state_;
+    bool isUac_;
     
-    uint32_t localCSeq_ = 1;
-    uint32_t remoteCSeq_ = 0;
+    uint32_t localCSeq_;
+    uint32_t remoteCSeq_;
     
     std::string remoteTarget_;              // Contact URI
     std::vector<std::string> routeSet_;     // Record-Route 헤더들
@@ -145,7 +194,7 @@ private:
     std::string remoteUri_;     // To URI (UAC) 또는 From URI (UAS)
     
     std::string remoteIp_;
-    uint16_t remotePort_ = 0;
+    uint16_t remotePort_;
     
     std::chrono::steady_clock::time_point createdAt_;
 };

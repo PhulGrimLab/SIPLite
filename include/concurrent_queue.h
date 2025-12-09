@@ -8,7 +8,13 @@ template <typename T>
 class ConcurrentQueue 
 {
 public:
-    ConcurrentQueue() = default;
+    // 최대 큐 크기 (메모리 보호)
+    static constexpr std::size_t DEFAULT_MAX_SIZE = 10000;
+    
+    explicit ConcurrentQueue(std::size_t maxSize = DEFAULT_MAX_SIZE)
+        : maxSize_(maxSize)
+    {}
+    
     ~ConcurrentQueue() = default;
 
     // 복사/이동 금지
@@ -17,23 +23,34 @@ public:
     ConcurrentQueue(ConcurrentQueue&&) = delete;
     ConcurrentQueue& operator=(ConcurrentQueue&&) = delete;
 
-    void push(const T& value) 
+    // 큐에 요소 추가 (shutdown 상태이거나 가득 찼으면 false 반환)
+    bool push(const T& value) 
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (shutdown_ || queue_.size() >= maxSize_)
+            {
+                return false;
+            }
             queue_.push(value);
         }
         cv_.notify_one();
+        return true;
     }
 
     // move 버전
-    void push(T&& value) 
+    bool push(T&& value) 
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (shutdown_ || queue_.size() >= maxSize_)
+            {
+                return false;
+            }
             queue_.push(std::move(value));
         }
         cv_.notify_one();
+        return true;
     }
 
     // 큐에서 요소를 꺼냄
@@ -47,9 +64,15 @@ public:
             return !queue_.empty() || shutdown_;
         });
 
-        if (queue_.empty()) 
+        // shutdown 상태에서 큐가 비어있으면 종료
+        if (shutdown_ && queue_.empty()) 
         {
-            // shutdown + empty
+            return false;
+        }
+        
+        // shutdown 상태라도 큐에 데이터가 있으면 처리
+        if (queue_.empty())
+        {
             return false;
         }
 
@@ -69,10 +92,26 @@ public:
         cv_.notify_all();
     }
 
+    // shutdown 상태 리셋 및 큐 비우기 (재시작용)
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        shutdown_ = false;
+        // 큐 비우기
+        std::queue<T> empty;
+        std::swap(queue_, empty);
+    }
+
     bool empty()
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.empty();
+    }
+
+    std::size_t size()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
     }
 
 private:
@@ -80,4 +119,5 @@ private:
     std::mutex mutex_;
     std::condition_variable cv_;
     bool shutdown_ = false;
+    const std::size_t maxSize_;  // const로 변경 불가 보장
 };

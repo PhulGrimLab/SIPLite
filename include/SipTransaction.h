@@ -4,6 +4,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <atomic>
+#include <mutex>
 
 // ================================
 // SIP 트랜잭션 상태 (RFC 3261)
@@ -101,6 +103,21 @@ namespace SipTimers
     
     // Timer K: 응답 재전송 대기 (T4 for UDP)
     constexpr int TIMER_K_MS = T4_MS;
+    
+    // 최대 재전송 횟수 (무한 재전송 방지)
+    constexpr int MAX_RETRANSMIT_COUNT = 10;
+    
+    // 재전송 간격 계산 (오버플로우 방지)
+    inline int calculateRetransmitInterval(int baseMs, int retransmitCount) 
+    {
+        // retransmitCount가 너무 크면 shift 오버플로우 방지
+        if (retransmitCount >= 10) 
+        {
+            return T2_MS;  // 최대값으로 제한
+        }
+        int64_t interval = static_cast<int64_t>(baseMs) * (1 << retransmitCount);
+        return static_cast<int>(std::min(interval, static_cast<int64_t>(T2_MS)));
+    }
 }
 
 // ================================
@@ -136,6 +153,12 @@ struct TransactionKeyHash
 // ================================
 // SIP 트랜잭션 기본 클래스
 // ================================
+// 
+// 뮤텍스 획득 순서 (데드락 방지):
+//   1. activityMutex_ (시간 관련 데이터)
+//   2. dataMutex_ (메시지/주소 데이터)
+// 두 뮤텍스를 동시에 획득할 경우 반드시 위 순서를 지켜야 함
+//
 
 class SipTransaction 
 {
@@ -144,9 +167,10 @@ public:
         : key_(key)
         , type_(type)
         , createdAt_(std::chrono::steady_clock::now())
-        , lastActivity_(createdAt_)
+        , lastActivity_(std::chrono::steady_clock::now())  // createdAt_에 의존하지 않고 직접 초기화
         , retransmitCount_(0)
         , terminated_(false)
+        , remotePort_(0)
     {}
     
     virtual ~SipTransaction() = default;
@@ -160,12 +184,13 @@ public:
     // 접근자
     const TransactionKey& key() const { return key_; }
     TransactionType type() const { return type_; }
-    bool isTerminated() const { return terminated_; }
-    int retransmitCount() const { return retransmitCount_; }
+    bool isTerminated() const { return terminated_.load(std::memory_order_acquire); }
+    int retransmitCount() const { return retransmitCount_.load(std::memory_order_acquire); }
     
     // 타이머 관련
     void updateActivity() 
     { 
+        std::lock_guard<std::mutex> lock(activityMutex_);
         lastActivity_ = std::chrono::steady_clock::now(); 
     }
     
@@ -177,43 +202,85 @@ public:
     
     std::chrono::milliseconds timeSinceLastActivity() const 
     {
+        std::lock_guard<std::mutex> lock(activityMutex_);
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - lastActivity_);
     }
     
-    void incrementRetransmit() { ++retransmitCount_; }
+    // 재전송 횟수 증가 (상한 검사 포함)
+    bool incrementRetransmit() 
+    { 
+        int current = retransmitCount_.load(std::memory_order_acquire);
+        while (current < SipTimers::MAX_RETRANSMIT_COUNT)
+        {
+            if (retransmitCount_.compare_exchange_weak(current, current + 1,
+                std::memory_order_release, std::memory_order_acquire))
+            {
+                return true;
+            }
+        }
+        return false;  // 상한 초과
+    }
     
     // 종료
-    void terminate() { terminated_ = true; }
+    void terminate() { terminated_.store(true, std::memory_order_release); }
 
     // 원본 메시지 저장 (재전송용)
-    void setOriginalMessage(const std::string& msg) { originalMessage_ = msg; }
-    const std::string& originalMessage() const { return originalMessage_; }
+    void setOriginalMessage(const std::string& msg) 
+    { 
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        originalMessage_ = msg; 
+    }
+    std::string originalMessage() const 
+    { 
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        return originalMessage_; 
+    }
     
     // 마지막 응답 저장
-    void setLastResponse(const std::string& resp) { lastResponse_ = resp; }
-    const std::string& lastResponse() const { return lastResponse_; }
+    void setLastResponse(const std::string& resp) 
+    { 
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        lastResponse_ = resp; 
+    }
+    std::string lastResponse() const 
+    { 
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        return lastResponse_; 
+    }
 
     // 원격 주소
     void setRemoteAddr(const std::string& ip, uint16_t port) 
     { 
+        std::lock_guard<std::mutex> lock(dataMutex_);
         remoteIp_ = ip; 
         remotePort_ = port; 
     }
-    const std::string& remoteIp() const { return remoteIp_; }
-    uint16_t remotePort() const { return remotePort_; }
+    std::string remoteIp() const 
+    { 
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        return remoteIp_; 
+    }
+    uint16_t remotePort() const 
+    { 
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        return remotePort_; 
+    }
 
 protected:
     TransactionKey key_;
     TransactionType type_;
-    std::chrono::steady_clock::time_point createdAt_;
+    const std::chrono::steady_clock::time_point createdAt_;
     std::chrono::steady_clock::time_point lastActivity_;
-    int retransmitCount_;
-    bool terminated_;
+    std::atomic<int> retransmitCount_;
+    std::atomic<bool> terminated_;
+    
+    mutable std::mutex activityMutex_;
+    mutable std::mutex dataMutex_;
     std::string originalMessage_;
     std::string lastResponse_;
     std::string remoteIp_;
-    uint16_t remotePort_ = 0;
+    uint16_t remotePort_;
 };
 
 // ================================
@@ -228,18 +295,33 @@ public:
         , state_(ServerInviteState::Proceeding)
     {}
     
-    ServerInviteState state() const { return state_; }
+    ServerInviteState state() const { return state_.load(std::memory_order_acquire); }
     
-    void setState(ServerInviteState newState) 
+    // 상태 설정 (검증 포함)
+    bool setState(ServerInviteState newState) 
     { 
-        state_ = newState;
+        // 상태 전이 검증
+        if (!canTransitionTo(newState))
+        {
+            return false;  // 잘못된 상태 전이
+        }
+        state_.store(newState, std::memory_order_release);
+        updateActivity();
+        return true;
+    }
+    
+    // 검증 없이 강제 설정 (내부용)
+    void forceState(ServerInviteState newState)
+    {
+        state_.store(newState, std::memory_order_release);
         updateActivity();
     }
     
     // 상태 전이 검증
     bool canTransitionTo(ServerInviteState newState) const 
     {
-        switch (state_) 
+        ServerInviteState current = state_.load(std::memory_order_acquire);
+        switch (current) 
         {
             case ServerInviteState::Proceeding:
                 return newState == ServerInviteState::Completed ||
@@ -256,7 +338,7 @@ public:
     }
 
 private:
-    ServerInviteState state_;
+    std::atomic<ServerInviteState> state_;
 };
 
 // ================================
@@ -271,16 +353,43 @@ public:
         , state_(ServerNonInviteState::Trying)
     {}
     
-    ServerNonInviteState state() const { return state_; }
+    ServerNonInviteState state() const { return state_.load(std::memory_order_acquire); }
     
-    void setState(ServerNonInviteState newState) 
+    // 상태 설정 (검증 포함)
+    bool setState(ServerNonInviteState newState) 
     { 
-        state_ = newState;
+        // 상태 전이 검증
+        ServerNonInviteState current = state_.load(std::memory_order_acquire);
+        bool validTransition = false;
+        
+        switch (current)
+        {
+            case ServerNonInviteState::Trying:
+                validTransition = (newState == ServerNonInviteState::Proceeding ||
+                                   newState == ServerNonInviteState::Completed ||
+                                   newState == ServerNonInviteState::Terminated);
+                break;
+            case ServerNonInviteState::Proceeding:
+                validTransition = (newState == ServerNonInviteState::Completed ||
+                                   newState == ServerNonInviteState::Terminated);
+                break;
+            case ServerNonInviteState::Completed:
+                validTransition = (newState == ServerNonInviteState::Terminated);
+                break;
+            case ServerNonInviteState::Terminated:
+                validTransition = false;
+                break;
+        }
+        
+        if (!validTransition) return false;
+        
+        state_.store(newState, std::memory_order_release);
         updateActivity();
+        return true;
     }
 
 private:
-    ServerNonInviteState state_;
+    std::atomic<ServerNonInviteState> state_;
 };
 
 // ================================
@@ -296,23 +405,53 @@ public:
         , currentTimerA_(SipTimers::TIMER_A_MS)
     {}
     
-    ClientInviteState state() const { return state_; }
+    ClientInviteState state() const { return state_.load(std::memory_order_acquire); }
     
-    void setState(ClientInviteState newState) 
+    // 상태 설정 (검증 포함)
+    bool setState(ClientInviteState newState) 
     { 
-        state_ = newState;
+        if (!canTransitionTo(newState)) {
+            return false;
+        }
+        state_.store(newState, std::memory_order_release);
         updateActivity();
+        return true;
     }
     
-    int currentTimerA() const { return currentTimerA_; }
+    // 상태 전이 검증 (RFC 3261 Figure 5)
+    bool canTransitionTo(ClientInviteState newState) const
+    {
+        ClientInviteState current = state_.load(std::memory_order_acquire);
+        switch (current)
+        {
+            case ClientInviteState::Calling:
+                return newState == ClientInviteState::Proceeding ||
+                       newState == ClientInviteState::Completed ||
+                       newState == ClientInviteState::Terminated;
+            case ClientInviteState::Proceeding:
+                return newState == ClientInviteState::Completed ||
+                       newState == ClientInviteState::Terminated;
+            case ClientInviteState::Completed:
+                return newState == ClientInviteState::Terminated;
+            case ClientInviteState::Terminated:
+                return false;
+        }
+        return false;
+    }
+    
+    int currentTimerA() const { return currentTimerA_.load(std::memory_order_acquire); }
     void doubleTimerA() 
     { 
-        currentTimerA_ = std::min(currentTimerA_ * 2, SipTimers::T2_MS); 
+        int current = currentTimerA_.load(std::memory_order_acquire);
+        // 이미 최대값이면 불필요한 연산 방지
+        if (current >= SipTimers::T2_MS) return;
+        int doubled = std::min(current * 2, SipTimers::T2_MS);
+        currentTimerA_.store(doubled, std::memory_order_release);
     }
 
 private:
-    ClientInviteState state_;
-    int currentTimerA_;
+    std::atomic<ClientInviteState> state_;
+    std::atomic<int> currentTimerA_;
 };
 
 // ================================
@@ -328,21 +467,51 @@ public:
         , currentTimerE_(SipTimers::TIMER_E_MS)
     {}
     
-    ClientNonInviteState state() const { return state_; }
+    ClientNonInviteState state() const { return state_.load(std::memory_order_acquire); }
     
-    void setState(ClientNonInviteState newState) 
+    // 상태 설정 (검증 포함)
+    bool setState(ClientNonInviteState newState) 
     { 
-        state_ = newState;
+        if (!canTransitionTo(newState)) {
+            return false;
+        }
+        state_.store(newState, std::memory_order_release);
         updateActivity();
+        return true;
     }
     
-    int currentTimerE() const { return currentTimerE_; }
+    // 상태 전이 검증 (RFC 3261 Figure 6)
+    bool canTransitionTo(ClientNonInviteState newState) const
+    {
+        ClientNonInviteState current = state_.load(std::memory_order_acquire);
+        switch (current)
+        {
+            case ClientNonInviteState::Trying:
+                return newState == ClientNonInviteState::Proceeding ||
+                       newState == ClientNonInviteState::Completed ||
+                       newState == ClientNonInviteState::Terminated;
+            case ClientNonInviteState::Proceeding:
+                return newState == ClientNonInviteState::Completed ||
+                       newState == ClientNonInviteState::Terminated;
+            case ClientNonInviteState::Completed:
+                return newState == ClientNonInviteState::Terminated;
+            case ClientNonInviteState::Terminated:
+                return false;
+        }
+        return false;
+    }
+    
+    int currentTimerE() const { return currentTimerE_.load(std::memory_order_acquire); }
     void doubleTimerE() 
     { 
-        currentTimerE_ = std::min(currentTimerE_ * 2, SipTimers::T2_MS); 
+        int current = currentTimerE_.load(std::memory_order_acquire);
+        // 이미 최대값이면 불필요한 연산 방지
+        if (current >= SipTimers::T2_MS) return;
+        int doubled = std::min(current * 2, SipTimers::T2_MS);
+        currentTimerE_.store(doubled, std::memory_order_release);
     }
 
 private:
-    ClientNonInviteState state_;
-    int currentTimerE_;
+    std::atomic<ClientNonInviteState> state_;
+    std::atomic<int> currentTimerE_;
 };
