@@ -212,7 +212,7 @@ void UdpServer::workerLoop(std::size_t workerId)
 
 void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt) 
 {
-    // 로그 출력 시 mutex 보호 (스레드 간 출력 섞임 방지)
+    // 수신 로그
     {
         std::lock_guard<std::mutex> lock(g_logMutex);
         std::cout << "------------------------------------------\n";
@@ -221,18 +221,52 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
         std::cout << pkt.data << "\n";
     }
 
-    // 에코: 받은 데이터를 다시 클라이언트로 전송
-    if (sendTo(pkt.remoteIp, pkt.remotePort, pkt.data)) 
+    // SIP 메시지 파싱
+    SipMessage msg;
+    if (!parseSipMessage(pkt.data, msg))
+    {
+        // SIP 메시지가 아니면 에코 모드
+        if (sendTo(pkt.remoteIp, pkt.remotePort, pkt.data)) 
+        {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            std::cout << "[Worker " << workerId << "] Echo sent to "
+                      << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+        }
+        return;
+    }
+
+    // SIP 요청 처리
+    std::string response;
+    if (sipCore_.handlePacket(pkt, msg, response))
+    {
+        if (!response.empty())
+        {
+            // 응답 전송
+            if (sendTo(pkt.remoteIp, pkt.remotePort, response)) 
+            {
+                std::lock_guard<std::mutex> lock(g_logMutex);
+                std::cout << "[Worker " << workerId << "] SIP response sent to "
+                          << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+                std::cout << response << "\n";
+            } 
+            else 
+            {
+                std::lock_guard<std::mutex> lock(g_logMutex);
+                std::cerr << "[Worker " << workerId << "] Failed to send SIP response\n";
+            }
+        }
+        else
+        {
+            // ACK 등 응답이 없는 요청
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            std::cout << "[Worker " << workerId << "] SIP " << msg.method 
+                      << " processed (no response)\n";
+        }
+    }
+    else
     {
         std::lock_guard<std::mutex> lock(g_logMutex);
-        std::cout << "[Worker " << workerId << "] Echo sent to "
-                  << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-    } 
-    else 
-    {
-        std::lock_guard<std::mutex> lock(g_logMutex);
-        std::cout << "[Worker " << workerId << "] Echo failed to"
-                  << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+        std::cerr << "[Worker " << workerId << "] Failed to handle SIP message\n";
     }
 }
 

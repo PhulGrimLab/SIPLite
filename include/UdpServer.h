@@ -2,11 +2,13 @@
 
 #include "concurrent_queue.h"
 #include "UdpPacket.h"
+#include "SipCore.h"
 
 #include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
+#include <memory>
 
 class UdpServer 
 {
@@ -27,6 +29,10 @@ public:
     // 클라이언트에게 데이터 전송
     bool sendTo(const std::string& ip, uint16_t port, const std::string& data);
 
+    // SIP 코어 접근
+    SipCore& sipCore() { return sipCore_; }
+    const SipCore& sipCore() const { return sipCore_; }
+
 private:
     bool bindSocket(const std::string& ip, uint16_t port);
     void recvLoop();
@@ -39,4 +45,6 @@ private:
     std::thread recvThread_;
     std::vector<std::thread> workerThreads_;
     ConcurrentQueue<UdpPacket> queue_;
+    
+    SipCore sipCore_;
 };
