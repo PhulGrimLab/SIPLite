@@ -14,6 +14,7 @@
 namespace {
     std::mutex g_logMutex;
     constexpr std::size_t RECV_BUFFER_SIZE = 2048;  // UDP 수신 버퍼 크기
+    constexpr std::size_t MAX_LOG_DATA_LENGTH = 200; // 로그 출력 최대 길이
     
     // 스레드 안전한 에러 로깅 (perror 대체)
     void logError(const char* prefix) {
@@ -30,6 +31,38 @@ namespace {
         std::lock_guard<std::mutex> lock(g_logMutex);
         std::cerr << prefix << ": " << result << " (errno=" << savedErrno << ")\n";
         #endif
+    }
+    
+    // 로그 출력용 문자열 정화 (로그 인젝션 방지)
+    std::string sanitizeLogData(const std::string& data, std::size_t maxLen = MAX_LOG_DATA_LENGTH) 
+    {
+        std::string result;
+        result.reserve(std::min(data.size(), maxLen));
+        
+        for (std::size_t i = 0; i < data.size() && result.size() < maxLen; ++i)
+        {
+            char c = data[i];
+            // 출력 가능한 ASCII + 일부 공백 문자 허용
+            if (c >= 32 && c < 127)
+            {
+                result += c;
+            }
+            else if (c == '\r' || c == '\n' || c == '\t')
+            {
+                result += c;  // SIP 메시지 구조 유지
+            }
+            else
+            {
+                result += '.';  // 비출력 문자는 .으로 대체
+            }
+        }
+        
+        if (data.size() > maxLen)
+        {
+            result += "... (truncated)";
+        }
+        
+        return result;
     }
 }
 
@@ -250,13 +283,35 @@ void UdpServer::workerLoop(std::size_t workerId)
 
 void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt) 
 {
-    // 수신 로그
+    // 패킷 크기 검증 (최소 SIP 메시지 크기: "SIP/2.0 200 OK\r\n\r\n" ≈ 20 바이트)
+    constexpr std::size_t MIN_SIP_SIZE = 20;
+    constexpr std::size_t MAX_SIP_SIZE = 65536;  // 64KB
+    
+    if (pkt.data.size() < MIN_SIP_SIZE)
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cerr << "[Worker " << workerId << "] Packet too small from "
+                  << pkt.remoteIp << ":" << pkt.remotePort 
+                  << " (" << pkt.data.size() << " bytes)\n";
+        return;
+    }
+    
+    if (pkt.data.size() > MAX_SIP_SIZE)
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        std::cerr << "[Worker " << workerId << "] Packet too large from "
+                  << pkt.remoteIp << ":" << pkt.remotePort 
+                  << " (" << pkt.data.size() << " bytes)\n";
+        return;
+    }
+    
+    // 수신 로그 (정화된 데이터)
     {
         std::lock_guard<std::mutex> lock(g_logMutex);
         std::cout << "------------------------------------------\n";
         std::cout << "[Worker " << workerId << "] from "
                 << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-        std::cout << pkt.data << "\n";
+        std::cout << sanitizeLogData(pkt.data) << "\n";
     }
 
     // SIP 메시지 파싱
@@ -285,7 +340,7 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
                 std::lock_guard<std::mutex> lock(g_logMutex);
                 std::cout << "[Worker " << workerId << "] SIP response sent to "
                           << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-                std::cout << response << "\n";
+                std::cout << sanitizeLogData(response) << "\n";
             } 
             else 
             {

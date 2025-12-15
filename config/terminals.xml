@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<terminals>
+    <!-- 단말 등록 정보 -->
+    <terminal>
+        <aor>sip:1001@192.168.1.100</aor>
+        <contact>sip:1001@192.168.1.101:5060</contact>
+        <ip>192.168.1.101</ip>
+        <port>5060</port>
+        <expires>3600</expires>
+        <description>회의실 A 전화기</description>
+    </terminal>
+    
+    <terminal>
+        <aor>sip:1002@192.168.1.100</aor>
+        <contact>sip:1002@192.168.1.102:5060</contact>
+        <ip>192.168.1.102</ip>
+        <port>5060</port>
+        <expires>3600</expires>
+        <description>회의실 B 전화기</description>
+    </terminal>
+    
+    <terminal>
+        <aor>sip:1003@192.168.1.100</aor>
+        <contact>sip:1003@192.168.1.103:5060</contact>
+        <ip>192.168.1.103</ip>
+        <port>5060</port>
+        <expires>7200</expires>
+        <description>로비 전화기</description>
+    </terminal>
+</terminals>

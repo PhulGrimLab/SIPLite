@@ -17,10 +17,10 @@ public:
     ~UdpServer();
 
     // 복사/이동 금지
-    UdpServer(const UdpServer&) = delete;
-    UdpServer& operator=(const UdpServer&) = delete;
-    UdpServer(UdpServer&&) = delete;
-    UdpServer& operator=(UdpServer&&) = delete;
+    UdpServer(const UdpServer&) = delete;               // 복사 생성자 삭제
+    UdpServer& operator=(const UdpServer&) = delete;    // 복사 할당 연산자 삭제
+    UdpServer(UdpServer&&) = delete;                    // 이동 생성자 삭제
+    UdpServer& operator=(UdpServer&&) = delete;         // 이동 할당 연산자 삭제
 
     // ip: "0.0.0.0", port: 5060, workerCount: 워커 스레드 수
     bool start(const std::string& ip, uint16_t port, std::size_t workerCount);

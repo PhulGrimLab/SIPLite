@@ -14,7 +14,9 @@
 #include <random>
 #include <vector>
 #include <optional>
-#include <thread>  // for std::this_thread::get_id()
+#include <thread>      // for std::this_thread::get_id()
+#include <charconv>    // for std::from_chars
+#include <limits>      // for std::numeric_limits
 
 // ================================
 // 0) 보안 상수 정의
@@ -132,6 +134,24 @@ inline std::string getHeader(const SipMessage& msg, const std::string& name)
     return it->second;
 }
 
+// 헤더 값에서 CRLF 제거 (Response Splitting 방지)
+inline std::string sanitizeHeaderValue(const std::string& value)
+{
+    std::string result;
+    result.reserve(value.size());
+    
+    for (char c : value)
+    {
+        // CR, LF, NULL 문자 제거
+        if (c != '\r' && c != '\n' && c != '\0')
+        {
+            result += c;
+        }
+    }
+    
+    return result;
+}
+
 // "To: <sip:1001@server>;tag=..." 형태에서 URI 뽑기
 inline std::string extractUriFromHeader(const std::string& headerValue)
 {
@@ -203,21 +223,51 @@ inline bool isValidStatusCode(int code)
     return code >= 100 && code <= 699;
 }
 
+// Request URI 기본 검증
+inline bool isValidRequestUri(const std::string& uri)
+{
+    // 빈 URI 거부
+    if (uri.empty() || uri.size() > 256)
+    {
+        return false;
+    }
+    
+    // sip: 또는 sips: 프리픽스 필수
+    if (uri.substr(0, 4) != "sip:" && uri.substr(0, 5) != "sips:")
+    {
+        return false;
+    }
+    
+    // 위험 문자 체크 (CRLF 인젝션)
+    for (char c : uri)
+    {
+        if (c == '\r' || c == '\n' || c == '\0')
+        {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
 // To 헤더에 tag 없으면 tag=server 추가
 inline std::string ensureToTag(const std::string& to) 
 {
-    if (to.find("tag=") != std::string::npos) 
+    // 입력 정화 (CRLF 인젝션 방지)
+    std::string sanitized = sanitizeHeaderValue(to);
+    
+    if (sanitized.find("tag=") != std::string::npos) 
     {
-        return to;
+        return sanitized;
     }
 
     // 단순하게 뒤에 ;tag=server 붙이기
-    if (!to.empty() && to.back() == '>') 
+    if (!sanitized.empty() && sanitized.back() == '>') 
     {
-        return to + ";tag=server";
+        return sanitized + ";tag=server";
     }
 
-    return to + ";tag=server";
+    return sanitized + ";tag=server";
 }
 
 // ================================
@@ -286,6 +336,12 @@ inline bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
             out.sipVersion   = proto;
             out.type         = SipType::Response;
 
+            // SIP 버전 검증
+            if (!isValidSipVersion(out.sipVersion))
+            {
+                return false;
+            }
+
             // 상태 코드 유효성 검증
             if (!isValidStatusCode(out.statusCode))
             {
@@ -308,6 +364,12 @@ inline bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
 
             // SIP 버전 검증
             if (!isValidSipVersion(out.sipVersion))
+            {
+                return false;
+            }
+            
+            // Request URI 검증
+            if (!isValidRequestUri(out.requestUri))
             {
                 return false;
             }
@@ -573,6 +635,148 @@ public:
         std::lock_guard<std::mutex> lock(callMutex_);
         return activeCalls_.size();
     }
+    
+    // ================================
+    // 통계 정보 구조체 (한 번에 조회)
+    // ================================
+    
+    struct ServerStats
+    {
+        std::size_t registrationCount = 0;
+        std::size_t activeRegistrationCount = 0;  // 만료되지 않은 것만
+        std::size_t activeCallCount = 0;
+        std::size_t confirmedCallCount = 0;
+        std::size_t pendingCallCount = 0;
+    };
+    
+    // 통계 정보 일괄 조회 (락 최소화)
+    ServerStats getStats() const
+    {
+        ServerStats stats;
+        const auto now = std::chrono::steady_clock::now();
+        
+        // 등록 통계
+        {
+            std::lock_guard<std::mutex> lock(regMutex_);
+            stats.registrationCount = regs_.size();
+            
+            for (const auto& [aor, reg] : regs_)
+            {
+                if (reg.expiresAt > now)
+                {
+                    ++stats.activeRegistrationCount;
+                }
+            }
+        }
+        
+        // 통화 통계
+        {
+            std::lock_guard<std::mutex> lock(callMutex_);
+            stats.activeCallCount = activeCalls_.size();
+            
+            for (const auto& [callId, call] : activeCalls_)
+            {
+                if (call.confirmed)
+                {
+                    ++stats.confirmedCallCount;
+                }
+                else
+                {
+                    ++stats.pendingCallCount;
+                }
+            }
+        }
+        
+        return stats;
+    }
+
+    // ================================
+    // 프로그래매틱 단말 등록 (XML 설정용)
+    // ================================
+    
+    bool registerTerminal(const std::string& aor,
+                          const std::string& contact,
+                          const std::string& ip,
+                          uint16_t port,
+                          int expiresSec = 3600)
+    {
+        if (aor.empty() || ip.empty())
+        {
+            return false;
+        }
+        
+        // Expires 범위 검증
+        if (expiresSec < 0)
+        {
+            expiresSec = 0;
+        }
+        else if (expiresSec > SipConstants::MAX_EXPIRES_SEC)
+        {
+            expiresSec = SipConstants::MAX_EXPIRES_SEC;
+        }
+        
+        Registration reg;
+        reg.aor = aor;
+        reg.contact = contact.empty() ? aor : contact;
+        reg.ip = ip;
+        reg.port = port;
+        reg.expiresAt = std::chrono::steady_clock::now() + 
+                        std::chrono::seconds(expiresSec);
+        
+        {
+            std::lock_guard<std::mutex> lock(regMutex_);
+            if (regs_.find(aor) == regs_.end() && 
+                regs_.size() >= SipConstants::MAX_REGISTRATIONS)
+            {
+                return false;
+            }
+            regs_[aor] = reg;
+        }
+        
+        return true;
+    }
+    
+    // ================================
+    // 등록 정보 조회 (콘솔 출력용, 필터링 옵션 포함)
+    // ================================
+    
+    std::vector<Registration> getAllRegistrations(bool activeOnly = false) const
+    {
+        std::vector<Registration> result;
+        std::lock_guard<std::mutex> lock(regMutex_);
+        result.reserve(regs_.size());
+        
+        const auto now = std::chrono::steady_clock::now();
+        
+        for (const auto& [aor, reg] : regs_)
+        {
+            if (!activeOnly || reg.expiresAt > now)
+            {
+                result.push_back(reg);
+            }
+        }
+        return result;
+    }
+    
+    // ================================
+    // 활성 통화 정보 조회 (콘솔 출력용, 필터링 옵션 포함)
+    // ================================
+    
+    std::vector<ActiveCall> getAllActiveCalls(bool confirmedOnly = false) const
+    {
+        std::vector<ActiveCall> result;
+        std::lock_guard<std::mutex> lock(callMutex_);
+        result.reserve(activeCalls_.size());
+        
+        for (const auto& [callId, call] : activeCalls_)
+        {
+            if (!confirmedOnly || call.confirmed)
+            {
+                result.push_back(call);
+            }
+        }
+        return result;
+    }
 
 private:
     bool handleRegister(const UdpPacket& pkt,
@@ -603,23 +807,41 @@ private:
         std::string expHdr = getHeader(msg, "expires");
         if (!expHdr.empty()) 
         {
-            try 
+            // 숫자만 포함하는지 확인 (std::from_chars 사용으로 예외 없음)
+            bool validNumber = !expHdr.empty() && expHdr.size() <= 10;
+            for (char c : expHdr)
             {
-                expiresSec = std::stoi(expHdr);
-                // 범위 검증: 0 ~ MAX_EXPIRES_SEC
-                if (expiresSec < 0)
+                if (c < '0' || c > '9')
                 {
-                    expiresSec = 0;
+                    validNumber = false;
+                    break;
                 }
-                else if (expiresSec > SipConstants::MAX_EXPIRES_SEC)
-                {
-                    expiresSec = SipConstants::MAX_EXPIRES_SEC;
-                }
-            } 
-            catch (...)
-            {
-                expiresSec = SipConstants::DEFAULT_EXPIRES_SEC;
             }
+            
+            if (validNumber)
+            {
+                int value = 0;
+                auto [ptr, ec] = std::from_chars(
+                    expHdr.data(), expHdr.data() + expHdr.size(), value);
+                
+                if (ec == std::errc{} && ptr == expHdr.data() + expHdr.size())
+                {
+                    // 범위 검증: 0 ~ MAX_EXPIRES_SEC
+                    if (value < 0)
+                    {
+                        expiresSec = 0;
+                    }
+                    else if (value > SipConstants::MAX_EXPIRES_SEC)
+                    {
+                        expiresSec = SipConstants::MAX_EXPIRES_SEC;
+                    }
+                    else
+                    {
+                        expiresSec = value;
+                    }
+                }
+            }
+            // std::from_chars는 예외를 던지지 않으므로 catch 불필요
         }
 
         // Registration 저장
@@ -857,11 +1079,12 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 200 OK\r\n";
 
-        std::string via     = getHeader(msg, "via");
-        std::string from    = getHeader(msg, "from");
-        std::string to      = getHeader(msg, "to");
-        std::string callId  = getHeader(msg, "call-id");
-        std::string cseq    = getHeader(msg, "cseq");
+        // 헤더 값 정화 (CRLF 인젝션 방지)
+        std::string via     = sanitizeHeaderValue(getHeader(msg, "via"));
+        std::string from    = sanitizeHeaderValue(getHeader(msg, "from"));
+        std::string to      = sanitizeHeaderValue(getHeader(msg, "to"));
+        std::string callId  = sanitizeHeaderValue(getHeader(msg, "call-id"));
+        std::string cseq    = sanitizeHeaderValue(getHeader(msg, "cseq"));
 
         if (!via.empty())    oss << "Via: "     << via    << "\r\n";
         if (!from.empty())   oss << "From: "    << from   << "\r\n";
@@ -939,7 +1162,9 @@ private:
                 return seed;
             }
         }());
-        static thread_local std::uniform_int_distribution<uint32_t> dis;
+        // 범위를 명시적으로 지정 (0 ~ UINT32_MAX)
+        static thread_local std::uniform_int_distribution<uint32_t> dis(
+            0, std::numeric_limits<uint32_t>::max());
         
         std::ostringstream oss;
         oss << std::hex << dis(gen);
@@ -955,11 +1180,12 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 " << code << " " << reason << "\r\n";
 
-        std::string via     = getHeader(req, "via");
-        std::string from    = getHeader(req, "from");
-        std::string to      = getHeader(req, "to");
-        std::string callId  = getHeader(req, "call-id");
-        std::string cseq    = getHeader(req, "cseq");
+        // 헤더 값 정화 (CRLF 인젝션 방지)
+        std::string via     = sanitizeHeaderValue(getHeader(req, "via"));
+        std::string from    = sanitizeHeaderValue(getHeader(req, "from"));
+        std::string to      = sanitizeHeaderValue(getHeader(req, "to"));
+        std::string callId  = sanitizeHeaderValue(getHeader(req, "call-id"));
+        std::string cseq    = sanitizeHeaderValue(getHeader(req, "cseq"));
 
         if (!via.empty())    oss << "Via: "     << via    << "\r\n";
         if (!from.empty())   oss << "From: "    << from   << "\r\n";
@@ -1016,11 +1242,12 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 " << code << " " << reason << "\r\n";
 
-        std::string via     = getHeader(req, "via");
-        std::string from    = getHeader(req, "from");
-        std::string to      = getHeader(req, "to");
-        std::string callId  = getHeader(req, "call-id");
-        std::string cseq    = getHeader(req, "cseq");
+        // 헤더 값 정화 (CRLF 인젝션 방지)
+        std::string via     = sanitizeHeaderValue(getHeader(req, "via"));
+        std::string from    = sanitizeHeaderValue(getHeader(req, "from"));
+        std::string to      = sanitizeHeaderValue(getHeader(req, "to"));
+        std::string callId  = sanitizeHeaderValue(getHeader(req, "call-id"));
+        std::string cseq    = sanitizeHeaderValue(getHeader(req, "cseq"));
 
         if (!via.empty())    oss << "Via: "     << via    << "\r\n";
         if (!from.empty())   oss << "From: "    << from   << "\r\n";
@@ -1039,12 +1266,13 @@ private:
         std::ostringstream oss;
         oss << "SIP/2.0 200 OK\r\n";
 
-        std::string via     = getHeader(req, "via");
-        std::string from    = getHeader(req, "from");
-        std::string to      = getHeader(req, "to");
-        std::string callId  = getHeader(req, "call-id");
-        std::string cseq    = getHeader(req, "cseq");
-        std::string contact = getHeader(req, "contact");
+        // 헤더 값 정화 (CRLF 인젝션 방지)
+        std::string via     = sanitizeHeaderValue(getHeader(req, "via"));
+        std::string from    = sanitizeHeaderValue(getHeader(req, "from"));
+        std::string to      = sanitizeHeaderValue(getHeader(req, "to"));
+        std::string callId  = sanitizeHeaderValue(getHeader(req, "call-id"));
+        std::string cseq    = sanitizeHeaderValue(getHeader(req, "cseq"));
+        std::string contact = sanitizeHeaderValue(getHeader(req, "contact"));
 
         if (!via.empty())     oss << "Via: "     << via                 << "\r\n";
         if (!from.empty())    oss << "From: "    << from                << "\r\n";
