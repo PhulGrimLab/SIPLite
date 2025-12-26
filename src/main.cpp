@@ -13,7 +13,8 @@
 #include <algorithm>
 #include <cctype>
 
-namespace {
+namespace // 현재 파일 내에서만 사용되는 전역 변수 선언
+{
     // volatile sig_atomic_t 사용 (시그널 핸들러에서 안전)
     volatile std::sig_atomic_t g_signalReceived = 0;
     std::atomic<bool> g_terminate(false);
@@ -25,11 +26,20 @@ extern "C" void signalHandler(int signo)
     g_signalReceived = signo;
 }
 
-namespace {
+namespace
+{
     // 시그널 체크 함수 (메인 스레드에서 호출)
     void checkSignal()
     {
-        int sig = g_signalReceived;
+        int sig = g_signalReceived;     // TOCTOU 문제 방지를 위해 로컬 복사
+        /*
+        TOCTOU (Time-of-check to time-of-use) 문제가 발생할 수 있습니다:
+
+        첫 번째 비교(g_signalReceived == SIGINT)를 수행하는 시점과
+        두 번째 비교(g_signalReceived == SIGTERM)를 수행하는 시점 사이에
+        시그널 핸들러가 값을 변경할 수 있습니다.
+        */
+       
         if (sig == SIGINT || sig == SIGTERM)
         {
             g_signalReceived = 0;  // 리셋
@@ -102,16 +112,17 @@ namespace {
                     return false;
                 }
             }
-            
-            return true;
         }
         catch (const std::exception& e)
         {
             std::cerr << "[오류] 경로 검증 실패\n";
             return false;
         }
+        
+        return true;
     }
-};
+}
+
 
 int main(int argc, char* argv[]) 
 {
@@ -134,7 +145,7 @@ int main(int argc, char* argv[])
 
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════════════════════╗\n";
-    std::cout << "║              SIPLite Server v0.1 시작 중...               ║\n";
+    std::cout << "║              SIPLite Server v0.1 시작 중...              ║\n";
     std::cout << "╚══════════════════════════════════════════════════════════╝\n";
     std::cout << "\n";
 

@@ -15,10 +15,11 @@ namespace {
     std::mutex g_logMutex;
     constexpr std::size_t RECV_BUFFER_SIZE = 2048;  // UDP 수신 버퍼 크기
     constexpr std::size_t MAX_LOG_DATA_LENGTH = 200; // 로그 출력 최대 길이
-    
-    // 스레드 안전한 에러 로깅 (perror 대체)
-    void logError(const char* prefix) {
-        int savedErrno = errno;  // errno를 즉시 캡처
+
+    // 스레드 안전한 로그 에러 로깅 (perror 대체)
+    void logError(const char* prefix) 
+    {
+        int savedErrno = errno; // errno 값을 저장
         char buf[256];
         // strerror_r의 GNU 버전과 XSI 버전 모두 처리
         #if (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200112L) && !defined(_GNU_SOURCE)
@@ -36,32 +37,73 @@ namespace {
     // 로그 출력용 문자열 정화 (로그 인젝션 방지)
     std::string sanitizeLogData(const std::string& data, std::size_t maxLen = MAX_LOG_DATA_LENGTH) 
     {
+        const std::string suffix = "... (truncated)";
+        const std::size_t suffixLen = suffix.size();
+
         std::string result;
-        result.reserve(std::min(data.size(), maxLen));
-        
-        for (std::size_t i = 0; i < data.size() && result.size() < maxLen; ++i)
+
+        // Reserve capacity: if truncation will happen, reserve full maxLen (including suffix)
+        if (data.size() > maxLen) 
         {
-            char c = data[i];
-            // 출력 가능한 ASCII + 일부 공백 문자 허용
-            if (c >= 32 && c < 127)
+            result.reserve(maxLen);
+        } 
+        else 
+        {
+            result.reserve(data.size());
+        }
+
+        // Determine how many bytes from the original data we can include so that
+        // result + suffix (if any) does not exceed maxLen
+        std::size_t contentMax = maxLen;
+        if (data.size() > maxLen) 
+        {
+            if (maxLen > suffixLen) 
             {
-                result += c;
+                contentMax = maxLen - suffixLen;
+            } 
+            else 
+            {
+                // Not enough room for suffix; we'll return a leading part of the suffix instead
+                contentMax = 0;
             }
-            else if (c == '\r' || c == '\n' || c == '\t')
+        } 
+        else 
+        {
+            contentMax = data.size();
+        }
+
+        for (std::size_t i = 0; i < data.size() && result.size() < contentMax; ++i)
+        {
+            unsigned char uc = static_cast<unsigned char>(data[i]);
+            // 출력 가능한 ASCII + 일부 공백 문자 허용
+            if (uc >= 32 && uc < 127)
             {
-                result += c;  // SIP 메시지 구조 유지
+                result += static_cast<char>(uc);
+            }
+            else if (uc == '\r' || uc == '\n' || uc == '\t')
+            {
+                result += static_cast<char>(uc);  // SIP 메시지 구조 유지
             }
             else
             {
                 result += '.';  // 비출력 문자는 .으로 대체
             }
         }
-        
+
         if (data.size() > maxLen)
         {
-            result += "... (truncated)";
+            if (maxLen > suffixLen)
+            {
+                result += suffix;
+            }
+            else if (maxLen > 0)
+            {
+                // Not enough room for full suffix: return its leading part
+                result = suffix.substr(0, maxLen);
+            }
+            // if maxLen == 0, result remains empty
         }
-        
+
         return result;
     }
 }
@@ -255,7 +297,7 @@ void UdpServer::recvLoop()
             // 큐가 가득 찼거나 shutdown 상태 - 패킷 버림
             std::lock_guard<std::mutex> lock(g_logMutex);
             std::cerr << "[RecvLoop] Queue full or shutdown, packet dropped from "
-                      << ipStr << ":" << ntohs(src.sin_port) << "\n";
+                      << pkt.remoteIp << ":" << pkt.remotePort << "\n";
         }
     }
 
@@ -264,7 +306,7 @@ void UdpServer::recvLoop()
 
 void UdpServer::workerLoop(std::size_t workerId) 
 {
-    std::cout << "[Worker " << workerId << "] started\n";
+    std::cout << "[UdpServer] Worker " << workerId << " started\n";
 
     while (true) 
     {
@@ -278,7 +320,7 @@ void UdpServer::workerLoop(std::size_t workerId)
         handlePacket(workerId, pkt);
     }
 
-    std::cout << "[Worker " << workerId << "] ended\n";
+    std::cout << "[UdpServer] Worker " << workerId << " ended\n";
 }
 
 void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt) 

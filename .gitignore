@@ -11,6 +11,9 @@ dist/
 .git/
 obj/
 bin/
+build/
+.github/
+logs/
 
 # Compiled Java class files
 *.class
@@ -20,6 +23,7 @@ bin/
 
 # Log files
 *.log
+*.bak
 
 # Package files
 *.jar

@@ -5,7 +5,7 @@
             "name": "Debug myapp",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/myapp",
+            "program": "${workspaceFolder}/build/my_siplite",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
