@@ -2,6 +2,7 @@
 #include "UdpPacket.h"
 #include "XmlConfigLoader.h"
 #include "ConsoleInterface.h"
+#include "Logger.h"
 
 #include <atomic>
 #include <csignal>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 
 namespace // 현재 파일 내에서만 사용되는 전역 변수 선언
 {
@@ -149,6 +151,26 @@ int main(int argc, char* argv[])
     std::cout << "╚══════════════════════════════════════════════════════════╝\n";
     std::cout << "\n";
 
+    // 로그 초기화 및 시작 로그
+    int retentionDays = 7; // 기본 보존기간: 7일
+    const char* env = std::getenv("SIPLITE_LOG_RETENTION_DAYS");
+    if (env)
+    {
+        try
+        {
+            int v = std::stoi(env);
+            if (v < 0) v = 0;
+            retentionDays = v;
+        }
+        catch (...)
+        {
+            std::cerr << "[Logger] Invalid SIPLITE_LOG_RETENTION_DAYS='" << env << "', using default " << retentionDays << "\n";
+        }
+    }
+
+    Logger::instance().init("logs", retentionDays);
+    Logger::instance().info("SIPLite Server v0.1 시작 중");
+    Logger::instance().info("[Logger] Log retention days: " + std::to_string(retentionDays));
     UdpServer server;
     const std::string bindIp = "0.0.0.0";
     const uint16_t bindPort = 5060;
@@ -161,7 +183,7 @@ int main(int argc, char* argv[])
     // 서버 시작
     if (!server.start(bindIp, bindPort, workerCount)) 
     {
-        std::cerr << "[오류] 서버 시작 실패\n";
+        Logger::instance().error("[오류] 서버 시작 실패");
         return 1;
     }
 
@@ -193,11 +215,14 @@ int main(int argc, char* argv[])
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    std::cout << "\n[서버] 종료 중...\n";
+    Logger::instance().info("[서버] 종료 중...");
     
     console.stop();
     server.stop();
     
-    std::cout << "[서버] 정상 종료되었습니다.\n\n";
+    Logger::instance().info("[서버] 정상 종료되었습니다.");
+
+    // 로그 파일 정리
+    Logger::instance().shutdown();
     return 0;
 }
