@@ -140,6 +140,11 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
         return false;
     }
 
+    // SIP 코어에 송신 콜백 설정
+    sipCore_.setSender([this](const std::string& ip, uint16_t port, const std::string& data){
+        return this->sendTo(ip, port, data);
+    });
+
     // 수신 스레드 시작
     recvThread_ = std::thread(&UdpServer::recvLoop, this);
 
@@ -336,6 +341,17 @@ void UdpServer::workerLoop(std::size_t workerId)
         handlePacket(workerId, pkt);
     }
 
+    // Periodic cleanup of stale transactions
+    try {
+        std::size_t removed = sipCore_.cleanupStaleTransactions();
+        if (removed > 0) {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            std::cout << "[UdpServer] cleanupStaleTransactions removed " << removed << " entries\n";
+        }
+    } catch (...) {
+        // be defensive: cleanup must not throw
+    }
+
     Logger::instance().info(std::string("[UdpServer] Worker ") + std::to_string(workerId) + " ended");
 }
 
@@ -386,38 +402,55 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
         return;
     }
 
-    // SIP 요청 처리
     std::string response;
-    if (sipCore_.handlePacket(pkt, msg, response))
+    if (msg.type == SipType::Request)
     {
-        if (!response.empty())
+        if (sipCore_.handlePacket(pkt, msg, response))
         {
-            // 응답 전송
-            if (sendTo(pkt.remoteIp, pkt.remotePort, response)) 
+            if (!response.empty())
             {
-                std::lock_guard<std::mutex> lock(g_logMutex);
-                std::cout << "[Worker " << workerId << "] SIP response sent to "
-                          << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-                std::cout << sanitizeLogData(response) << "\n";
-            } 
-            else 
+                // 응답 전송
+                if (sendTo(pkt.remoteIp, pkt.remotePort, response)) 
+                {
+                    std::lock_guard<std::mutex> lock(g_logMutex);
+                    std::cout << "[Worker " << workerId << "] SIP response sent to "
+                              << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+                    std::cout << sanitizeLogData(response) << "\n";
+                } 
+                else 
+                {
+                    std::lock_guard<std::mutex> lock(g_logMutex);
+                    std::cerr << "[Worker " << workerId << "] Failed to send SIP response\n";
+                }
+            }
+            else
             {
+                // ACK 등 응답이 없는 요청
                 std::lock_guard<std::mutex> lock(g_logMutex);
-                std::cerr << "[Worker " << workerId << "] Failed to send SIP response\n";
+                std::cout << "[Worker " << workerId << "] SIP " << msg.method 
+                          << " processed (no response)\n";
             }
         }
         else
         {
-            // ACK 등 응답이 없는 요청
             std::lock_guard<std::mutex> lock(g_logMutex);
-            std::cout << "[Worker " << workerId << "] SIP " << msg.method 
-                      << " processed (no response)\n";
+            std::cerr << "[Worker " << workerId << "] Failed to handle SIP request\n";
         }
     }
     else
     {
-        std::lock_guard<std::mutex> lock(g_logMutex);
-        std::cerr << "[Worker " << workerId << "] Failed to handle SIP message\n";
+        // Response 메시지: 이전에 포워딩한 INVITE의 응답일 수 있으므로 SipCore에 전달
+        if (sipCore_.handleResponse(pkt, msg))
+        {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            std::cout << "[Worker " << workerId << "] Forwarded SIP response for Call-ID "
+                      << sanitizeLogData(getHeader(msg, "call-id")) << "\n";
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            std::cerr << "[Worker " << workerId << "] Unhandled SIP response\n";
+        }
     }
 }
 

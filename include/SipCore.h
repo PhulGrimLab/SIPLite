@@ -446,9 +446,15 @@ inline bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
 // 4) SIP 코어 (REGISTER + INVITE 처리)
 // ================================
 
+#include <functional>
+#include <unordered_map>
+#include <chrono>
+
 class SipCore 
 {
 public:
+    using SenderFn = std::function<bool(const std::string&, uint16_t, const std::string&)>;
+
     // 패킷 + 파싱된 SIP 메시지 → outResponse에 응답 생성
     bool handlePacket(const UdpPacket& pkt,
                       const SipMessage& msg,
@@ -495,6 +501,144 @@ public:
         return true;
     }
 
+    // Sender 설정 (UdpServer에서 설정)
+    void setSender(SenderFn sender) { sender_ = std::move(sender); }
+
+    // 응답 메시지 처리 (forwarded INVITE의 응답을 원래 호출자에게 전달)
+    bool handleResponse(const UdpPacket& pkt, const SipMessage& msg)
+    {
+        std::string callId = getHeader(msg, "call-id");
+        std::string cseq  = getHeader(msg, "cseq");
+        if (callId.empty() || cseq.empty())
+            return false;
+
+        // cseq는 일반적으로 "<num> METHOD"
+        int cseqNum = 0;
+        {
+            size_t i = 0;
+            while (i < cseq.size() && std::isspace((unsigned char)cseq[i])) ++i;
+            while (i < cseq.size() && std::isdigit((unsigned char)cseq[i]))
+            {
+                cseqNum = cseqNum*10 + (cseq[i]-'0');
+                ++i;
+            }
+        }
+
+        std::string key = callId + ":" + std::to_string(cseqNum);
+
+        std::lock_guard<std::mutex> lock(pendingInvMutex_);
+        auto it = pendingInvites_.find(key);
+        if (it == pendingInvites_.end())
+            return false;
+
+        // Forward the response back to the original caller
+        if (sender_)
+        {
+            sender_(it->second.callerIp, it->second.callerPort, pkt.data);
+        }
+
+        // Update transaction metadata
+        if (msg.statusCode < 200)
+        {
+            it->second.state = TxState::PROCEEDING;
+            it->second.lastResponse = pkt.data;
+            it->second.attempts = 0;
+        }
+        else
+        {
+            // Final response
+            it->second.state = TxState::COMPLETED;
+            it->second.lastResponse = pkt.data;
+            it->second.expiry = std::chrono::steady_clock::now() + std::chrono::seconds(32);
+
+            // If this is a 2xx response to INVITE, create minimal dialog entry
+            if (msg.statusCode >= 200 && msg.statusCode < 300)
+            {
+                std::string cseq = getHeader(msg, "cseq");
+                std::string method;
+                // get method portion from cseq (e.g., "1 INVITE")
+                {
+                    size_t pos = 0;
+                    while (pos < cseq.size() && std::isdigit((unsigned char)cseq[pos])) ++pos;
+                    while (pos < cseq.size() && std::isspace((unsigned char)cseq[pos])) ++pos;
+                    method = cseq.substr(pos);
+                }
+                std::string methodUpper = method;
+                std::transform(methodUpper.begin(), methodUpper.end(), methodUpper.begin(), ::toupper);
+
+                if (methodUpper.rfind("INVITE",0) == 0)
+                {
+                    // Build dialog from activeCalls and pending invite info
+                    std::lock_guard<std::mutex> lock1(callMutex_);
+                    std::lock_guard<std::mutex> lock2(pendingInvMutex_);
+
+                    auto acIt = activeCalls_.find(callId);
+                    if (acIt != activeCalls_.end())
+                    {
+                        Dialog dlg;
+                        dlg.callId = callId;
+                        dlg.callerTag = acIt->second.fromTag;
+                        // extract callee tag from To header of response
+                        std::string toHdr = getHeader(msg, "to");
+                        dlg.calleeTag = extractTagFromHeader(toHdr);
+                        dlg.callerIp = it->second.callerIp;
+                        dlg.callerPort = it->second.callerPort;
+                        dlg.calleeIp = pkt.remoteIp;
+                        dlg.calleePort = pkt.remotePort;
+                        // parse cseq number
+                        int cseqNum = 0;
+                        {
+                            size_t i = 0;
+                            while (i < cseq.size() && std::isspace((unsigned char)cseq[i])) ++i;
+                            while (i < cseq.size() && std::isdigit((unsigned char)cseq[i]))
+                            {
+                                cseqNum = cseqNum*10 + (cseq[i]-'0');
+                                ++i;
+                            }
+                        }
+                        dlg.cseq = cseqNum;
+                        dlg.created = std::chrono::steady_clock::now();
+                        dlg.confirmed = false;
+
+                        // If response has SDP, store it in ActiveCall for possible use
+                        std::string body = msg.body;
+                        std::string ctype = getHeader(msg, "content-type");
+                        if (!body.empty())
+                        {
+                            acIt->second.lastSdp = body;
+                            acIt->second.lastSdpContentType = ctype.empty() ? "application/sdp" : ctype;
+                        }
+
+                        std::lock_guard<std::mutex> lockd(dlgMutex_);
+                        dialogs_[callId] = std::move(dlg);
+                    }
+                }
+
+                // If dialog already confirmed and callee retransmits 2xx, send ACK to callee
+                {
+                    std::lock_guard<std::mutex> lockd(dlgMutex_);
+                    auto dit = dialogs_.find(callId);
+                    if (dit != dialogs_.end() && dit->second.confirmed)
+                    {
+                        // This may be a retransmitted 2xx; send ACK to callee to stop retransmission
+                        // Build ACK from pending invite and last response
+                        auto pit = pendingInvites_.find(key);
+                        if (pit != pendingInvites_.end())
+                        {
+                            std::string ack = buildAckForPending(pit->second, pkt.data);
+                            if (!ack.empty() && sender_)
+                            {
+                                sender_(pkt.remoteIp, pkt.remotePort, ack);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
     // Registration 조회
     // WARNING: 반환된 포인터는 락 해제 후 무효화될 수 있음
     // 가능하면 findRegistrationSafe() 사용 권장
@@ -524,6 +668,24 @@ public:
         uint16_t calleePort = 0;
         std::chrono::steady_clock::time_point startTime;
         bool confirmed = false;
+        // Store last SDP body and content-type seen for this call (pass-through)
+        std::string lastSdp;
+        std::string lastSdpContentType;
+    };
+
+    // Dialog state (minimal representation)
+    struct Dialog
+    {
+        std::string callId;
+        std::string callerTag;   // remote tag from caller (From tag)
+        std::string calleeTag;   // remote tag from callee (To tag in 2xx)
+        std::string callerIp;
+        uint16_t callerPort = 0;
+        std::string calleeIp;
+        uint16_t calleePort = 0;
+        int cseq = 0;
+        bool confirmed = false;  // true after ACK
+        std::chrono::steady_clock::time_point created;
     };
 
     // WARNING: 반환된 포인터는 락 해제 후 무효화될 수 있음
@@ -619,6 +781,43 @@ public:
             ++it;
         }
         
+        return removed;
+    }
+
+    // ================================
+    // Pending INVITE (transaction) cleanup
+    // ================================
+    // Remove COMPLETED transactions whose expiry <= now, and remove
+    // non-COMPLETED transactions older than `ttl`.
+    std::size_t cleanupStaleTransactions(std::chrono::seconds ttl = std::chrono::seconds(32))
+    {
+        std::lock_guard<std::mutex> lock(pendingInvMutex_);
+        auto now = std::chrono::steady_clock::now();
+        std::size_t removed = 0;
+
+        for (auto it = pendingInvites_.begin(); it != pendingInvites_.end(); )
+        {
+            if (it->second.state == TxState::COMPLETED)
+            {
+                if (it->second.expiry <= now)
+                {
+                    it = pendingInvites_.erase(it);
+                    ++removed;
+                    continue;
+                }
+            }
+            else
+            {
+                if (now - it->second.ts > ttl)
+                {
+                    it = pendingInvites_.erase(it);
+                    ++removed;
+                    continue;
+                }
+            }
+            ++it;
+        }
+
         return removed;
     }
 
@@ -881,10 +1080,11 @@ private:
         std::string toHdr     = getHeader(msg, "to");
         std::string fromHdr   = getHeader(msg, "from");
         std::string callId    = getHeader(msg, "call-id");
+        std::string cseqHdr   = getHeader(msg, "cseq");
         // contactHdr는 향후 사용 예정
         // std::string contactHdr = getHeader(msg, "contact");
 
-        if (toHdr.empty() || fromHdr.empty() || callId.empty())
+        if (toHdr.empty() || fromHdr.empty() || callId.empty() || cseqHdr.empty())
         {
             outResponse = buildSimpleResponse(msg, 400, "Bad Request");
             return true;
@@ -921,9 +1121,16 @@ private:
             return true;
         }
 
-        // 100 Trying 응답 (실제 프로덕션에서는 발신자에게 먼저 전송)
-        // std::string trying = buildSimpleResponse(msg, 100, "Trying");
-        // sendTo(pkt.remoteIp, pkt.remotePort, trying);  // TODO: sendTo 콜백 필요
+        // 즉시 100 Trying을 호출자에게 보냄
+        if (sender_)
+        {
+            sender_(pkt.remoteIp, pkt.remotePort, buildSimpleResponse(msg, 100, "Trying"));
+        }
+        else
+        {
+            // fall back: set outResponse to Trying so UdpServer can send it
+            outResponse = buildSimpleResponse(msg, 100, "Trying");
+        }
 
         // 활성 통화 등록
         std::string fromTag = extractTagFromHeader(fromHdr);
@@ -953,13 +1160,61 @@ private:
             activeCalls_[callId] = call;
         }
 
-        // 180 Ringing 응답
-        outResponse = buildInviteResponse(msg, 180, "Ringing", toTag, "");
-        
-        // 실제 프로덕션에서는 여기서 callee에게 INVITE를 포워딩해야 함
-        // 지금은 간단히 자동 200 OK 응답 (에코 모드)
-        // outResponse = buildInviteResponse(msg, 200, "OK", toTag, msg.body);
-        
+        // Forward INVITE to callee (preserve raw request)
+        // Key by Call-ID:CSeq-number to correlate responses
+        int cseqNum = 0;
+        {
+            size_t i = 0;
+            while (i < cseqHdr.size() && std::isspace((unsigned char)cseqHdr[i])) ++i;
+            while (i < cseqHdr.size() && std::isdigit((unsigned char)cseqHdr[i]))
+            {
+                cseqNum = cseqNum*10 + (cseqHdr[i]-'0');
+                ++i;
+            }
+        }
+
+        std::string key = callId + ":" + std::to_string(cseqNum);
+
+        // If existing transaction exists, treat as retransmission: resend lastResponse
+        {
+            std::lock_guard<std::mutex> lock(pendingInvMutex_);
+            auto it = pendingInvites_.find(key);
+            if (it != pendingInvites_.end())
+            {
+                // Retransmission from caller: resend lastResponse (or 100 Trying fallback)
+                if (!it->second.lastResponse.empty() && sender_)
+                {
+                    sender_(pkt.remoteIp, pkt.remotePort, it->second.lastResponse);
+                }
+                else if (sender_)
+                {
+                    sender_(pkt.remoteIp, pkt.remotePort, buildSimpleResponse(msg, 100, "Trying"));
+                }
+                // Do not create new tx
+                return true;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(pendingInvMutex_);
+            PendingInvite pi;
+            pi.callerIp = pkt.remoteIp;
+            pi.callerPort = pkt.remotePort;
+            pi.origRequest = pkt.data;
+            pi.ts = std::chrono::steady_clock::now();
+            pi.state = TxState::TRYING;
+            pi.lastResponse = buildSimpleResponse(msg, 100, "Trying");
+            pendingInvites_[key] = std::move(pi);
+        }
+
+        if (sender_)
+        {
+            sender_(regCopy.ip, regCopy.port, pkt.data);
+        }
+
+        // 180 Ringing 응답 (기본 동작)
+        outResponse = buildInviteResponse(msg, 180, "Ringing", activeCalls_[callId].toTag, "");
+
         return true;
     }
 
@@ -971,23 +1226,53 @@ private:
                    const SipMessage& msg,
                    std::string& outResponse)
     {
-        (void)pkt;  // unused
-        
         std::string callId = getHeader(msg, "call-id");
-        
+        std::string cseqHdr = getHeader(msg, "cseq");
+
         if (callId.empty())
         {
             return false;
         }
 
-        // 통화 확인
+        // Try to forward ACK to callee if we have an active call
         {
             std::lock_guard<std::mutex> lock(callMutex_);
             auto it = activeCalls_.find(callId);
             if (it != activeCalls_.end())
             {
                 it->second.confirmed = true;
+                if (sender_)
+                {
+                    // Forward raw ACK packet to callee
+                    sender_(it->second.calleeIp, it->second.calleePort, pkt.data);
+                }
             }
+        }
+
+        // Mark dialog confirmed if exists
+        {
+            std::lock_guard<std::mutex> lock(dlgMutex_);
+            auto dit = dialogs_.find(callId);
+            if (dit != dialogs_.end())
+            {
+                dit->second.confirmed = true;
+            }
+        }
+
+        // Remove pending INVITE transaction (if exists) based on CallID:CSeq
+        if (!cseqHdr.empty())
+        {
+            int cseqNum = 0;
+            size_t i = 0;
+            while (i < cseqHdr.size() && std::isspace((unsigned char)cseqHdr[i])) ++i;
+            while (i < cseqHdr.size() && std::isdigit((unsigned char)cseqHdr[i]))
+            {
+                cseqNum = cseqNum*10 + (cseqHdr[i]-'0');
+                ++i;
+            }
+            std::string key = callId + ":" + std::to_string(cseqNum);
+            std::lock_guard<std::mutex> lock(pendingInvMutex_);
+            pendingInvites_.erase(key);
         }
 
         // ACK에는 응답 없음
@@ -1041,25 +1326,89 @@ private:
         (void)pkt;
         
         std::string callId = getHeader(msg, "call-id");
-        
-        if (callId.empty())
+        std::string cseqHdr = getHeader(msg, "cseq");
+
+        if (callId.empty() || cseqHdr.empty())
         {
             outResponse = buildSimpleResponse(msg, 400, "Bad Request");
             return true;
         }
 
-        // CANCEL에 대한 200 OK
+        // Reply 200 OK for CANCEL to the caller
         outResponse = buildSimpleResponse(msg, 200, "OK");
 
-        // 해당 INVITE 트랜잭션 찾아서 487 Request Terminated 전송
-        // (실제로는 트랜잭션 매니저를 통해 처리해야 함)
+        // Parse CSeq number
+        int cseqNum = 0;
+        size_t i = 0;
+        while (i < cseqHdr.size() && std::isspace((unsigned char)cseqHdr[i])) ++i;
+        while (i < cseqHdr.size() && std::isdigit((unsigned char)cseqHdr[i]))
         {
-            std::lock_guard<std::mutex> lock(callMutex_);
-            auto it = activeCalls_.find(callId);
-            if (it != activeCalls_.end() && !it->second.confirmed)
+            cseqNum = cseqNum*10 + (cseqHdr[i]-'0');
+            ++i;
+        }
+
+        std::string key = callId + ":" + std::to_string(cseqNum);
+
+        // If there is a pending INVITE transaction, forward CANCEL to callee and
+        // send 487 Request Terminated to the caller (and clean up)
+        {
+            std::lock_guard<std::mutex> lock(pendingInvMutex_);
+            auto pit = pendingInvites_.find(key);
+            if (pit != pendingInvites_.end())
             {
-                // 아직 확립되지 않은 통화 제거
-                activeCalls_.erase(it);
+                // Find callee info from activeCalls
+                std::string calleeIp;
+                uint16_t calleePort = 0;
+                {
+                    std::lock_guard<std::mutex> lock2(callMutex_);
+                    auto it = activeCalls_.find(callId);
+                    if (it != activeCalls_.end())
+                    {
+                        calleeIp = it->second.calleeIp;
+                        calleePort = it->second.calleePort;
+                    }
+                }
+
+                // Forward CANCEL to callee if we have callee info
+                std::string cancelRaw = buildCancelForPending(pit->second);
+                if (!cancelRaw.empty() && !calleeIp.empty() && sender_)
+                {
+                    sender_(calleeIp, calleePort, cancelRaw);
+                }
+
+                // Send 487 Request Terminated to caller immediately to terminate the INVITE
+                SipMessage pendingReq;
+                if (parseSipMessage(pit->second.origRequest, pendingReq))
+                {
+                    std::string resp487 = buildSimpleResponse(pendingReq, 487, "Request Terminated");
+                    if (sender_)
+                    {
+                        sender_(pit->second.callerIp, pit->second.callerPort, resp487);
+                    }
+                    pit->second.lastResponse = resp487;
+                }
+
+                // Mark as completed and set short expiry
+                pit->second.state = TxState::COMPLETED;
+                pit->second.expiry = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+
+                // Remove active call record as it was not confirmed
+                {
+                    std::lock_guard<std::mutex> lock2(callMutex_);
+                    auto it = activeCalls_.find(callId);
+                    if (it != activeCalls_.end() && !it->second.confirmed)
+                        activeCalls_.erase(it);
+                }
+            }
+            else
+            {
+                // No matching INVITE transaction; nothing to forward, we already returned 200 OK
+                std::lock_guard<std::mutex> lock2(callMutex_);
+                auto it = activeCalls_.find(callId);
+                if (it != activeCalls_.end() && !it->second.confirmed)
+                {
+                    activeCalls_.erase(it);
+                }
             }
         }
 
@@ -1175,7 +1524,8 @@ private:
                                     int code,
                                     const std::string& reason,
                                     const std::string& toTag,
-                                    const std::string& sdpBody)
+                                    const std::string& sdpBody,
+                                    const std::string& contentType = "application/sdp")
     {
         std::ostringstream oss;
         oss << "SIP/2.0 " << code << " " << reason << "\r\n";
@@ -1221,7 +1571,8 @@ private:
 
         if (!sdpBody.empty())
         {
-            oss << "Content-Type: application/sdp\r\n";
+            // Use provided content type
+            oss << "Content-Type: " << contentType << "\r\n";
             oss << "Content-Length: " << sdpBody.size() << "\r\n";
             oss << "\r\n";
             oss << sdpBody;
@@ -1232,6 +1583,86 @@ private:
             oss << "\r\n";
         }
 
+        return oss.str();
+    }
+
+    struct PendingInvite; // forward declaration
+
+    std::string buildAckForPending(const PendingInvite& pi, const std::string& respRaw) const
+    {
+        SipMessage req, resp;
+        if (!parseSipMessage(pi.origRequest, req))
+            return std::string();
+        if (!parseSipMessage(respRaw, resp))
+            return std::string();
+
+        std::string requestUri = req.requestUri;
+        if (!isValidRequestUri(requestUri))
+            requestUri = "sip:unknown";
+
+        std::string fromHdr = sanitizeHeaderValue(getHeader(req, "from"));
+        std::string toHdr = getHeader(resp, "to");
+        std::string callId = sanitizeHeaderValue(getHeader(resp, "call-id"));
+        std::string cseq = getHeader(resp, "cseq");
+
+        int cseqNum = 0;
+        size_t i = 0;
+        while (i < cseq.size() && std::isspace((unsigned char)cseq[i])) ++i;
+        while (i < cseq.size() && std::isdigit((unsigned char)cseq[i]))
+        {
+            cseqNum = cseqNum*10 + (cseq[i]-'0');
+            ++i;
+        }
+
+        std::ostringstream oss;
+        oss << "ACK " << requestUri << " SIP/2.0\r\n";
+
+        std::string via = sanitizeHeaderValue(getHeader(resp, "via"));
+        if (!via.empty()) oss << "Via: " << via << "\r\n";
+
+        if (!fromHdr.empty()) oss << "From: " << fromHdr << "\r\n";
+        if (!toHdr.empty())   oss << "To: " << toHdr << "\r\n";
+        if (!callId.empty())  oss << "Call-ID: " << callId << "\r\n";
+
+        oss << "CSeq: " << cseqNum << " ACK\r\n";
+        oss << "Content-Length: 0\r\n\r\n";
+
+        return oss.str();
+    }
+
+    std::string buildCancelForPending(const PendingInvite& pi) const
+    {
+        SipMessage req;
+        if (!parseSipMessage(pi.origRequest, req))
+            return std::string();
+
+        std::string requestUri = req.requestUri;
+        if (!isValidRequestUri(requestUri))
+            requestUri = "sip:unknown";
+
+        std::string via = sanitizeHeaderValue(getHeader(req, "via"));
+        std::string from = sanitizeHeaderValue(getHeader(req, "from"));
+        std::string to = sanitizeHeaderValue(getHeader(req, "to"));
+        std::string callId = sanitizeHeaderValue(getHeader(req, "call-id"));
+        std::string cseq = getHeader(req, "cseq");
+
+        int cseqNum = 0;
+        size_t i = 0;
+        while (i < cseq.size() && std::isspace((unsigned char)cseq[i])) ++i;
+        while (i < cseq.size() && std::isdigit((unsigned char)cseq[i]))
+        {
+            cseqNum = cseqNum*10 + (cseq[i]-'0');
+            ++i;
+        }
+
+        std::ostringstream oss;
+        oss << "CANCEL " << requestUri << " SIP/2.0\r\n";
+        if (!via.empty())  oss << "Via: " << via << "\r\n";
+        if (!from.empty()) oss << "From: " << from << "\r\n";
+        if (!to.empty())   oss << "To: " << to << "\r\n";
+        if (!callId.empty()) oss << "Call-ID: " << callId << "\r\n";
+        oss << "CSeq: " << cseqNum << " CANCEL\r\n";
+        oss << "Content-Length: 0\r\n\r\n";
         return oss.str();
     }
 
@@ -1293,4 +1724,30 @@ private:
     
     mutable std::mutex callMutex_;
     std::map<std::string, ActiveCall> activeCalls_;
+
+    // Transaction state for INVITE
+    enum class TxState { TRYING, PROCEEDING, COMPLETED };
+
+    // Pending forwarded INVITEs: key = CallID:CSeq
+    struct PendingInvite
+    {
+        std::string callerIp;
+        uint16_t callerPort = 0;
+        std::string origRequest;       // raw request forwarded
+        std::string lastResponse;      // last raw response forwarded back to caller
+        TxState state = TxState::TRYING;
+        int attempts = 0;              // retransmission attempts observed
+        std::chrono::steady_clock::time_point ts;     // creation time
+        std::chrono::steady_clock::time_point expiry; // when COMPLETED entry may be removed
+    };
+
+    mutable std::mutex pendingInvMutex_;
+    std::unordered_map<std::string, PendingInvite> pendingInvites_;
+
+    // Dialog storage
+    mutable std::mutex dlgMutex_;
+    std::unordered_map<std::string, Dialog> dialogs_;
+
+    // Sender callback (set by UdpServer)
+    SenderFn sender_;
 };
