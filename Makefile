@@ -1,7 +1,7 @@
 # 컴파일러 설정
 CXX = g++
-CXXFLAGS = -Wall -Wextra -std=c++17 -g -I./include
-LDFLAGS = 
+CXXFLAGS = -Wall -Wextra -std=c++17 -g -I./include -pthread
+LDFLAGS = -pthread
 
 # 디렉토리 설정
 SRC_DIR = src
@@ -40,7 +40,7 @@ debug: all
 
 # 릴리즈 빌드
 release: CXXFLAGS += -O2 -DNDEBUG
-release: LDFLAGS += -s
+release: LDFLAGS += -s -pthread
 release: all
 
 # 실행
