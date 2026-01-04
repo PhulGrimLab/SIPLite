@@ -6,40 +6,76 @@
 #include <cstdio>
 #include <ctime>
 
+#ifdef __unix__
+#include <unistd.h> // for ::close and STDIN_FILENO
+#endif
+
 ConsoleInterface::~ConsoleInterface()
 {
     stop();
 }
 
+/*
+
+// Thread A
+data = 123;
+ready.store(true, std::memory_order_release);
+
+// Thread B
+if (ready.load(std::memory_order_acquire)) {
+    // 여기서는 data == 123 이 보장
+    use(data);
+}
+    
+Acquire 효과: CAS 이후에 있는 코드(일반 read/write)가 CAS 이전으로 올라오는 걸 막음
+→ “락을 잡기 전에” 공유 데이터에 접근하는 일이 없도록 만들 때 유용
+
+Release 효과: CAS 이전에 있던 코드(일반 read/write)가 CAS 이후로 내려가는 걸 막음
+→ CAS 전에 해둔 변경들을 다른 스레드가 acquire로 관측할 수 있게 “게시”할 때 유용
+
+*/
+
 void ConsoleInterface::start()
 {
     bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true,
-        std::memory_order_acq_rel))
+    if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
-        return;  // 이미 실행 중
+        return;      // 이미 실행중인 상태
     }
 
-    // 입력 스레드와 처리 스레드 분리
-    inputThread_ = std::thread(&ConsoleInterface::inputLoop, this);
+    // 콘솔 처리 스레드 시작
     consoleThread_ = std::thread(&ConsoleInterface::consoleLoop, this);
+    // 입력 처리 스레드 시작
+    inputThread_ = std::thread(&ConsoleInterface::inputLoop, this);
 }
 
 void ConsoleInterface::stop()
 {
     bool expected = true;
-    if (!running_.compare_exchange_strong(expected, false,
-        std::memory_order_acq_rel))
+    if (!running_.compare_exchange_strong(expected, false, std::memory_order_acq_rel))
     {
-        return;  // 이미 중지됨
+        return;     // 이미 중지된 상태
     }
 
     // 조건변수로 대기 중인 스레드 깨우기
+    /*
+    입력스레드가 블로킹 I/O 중일 수 있으므로 여기서 바로 종료되지 않을 수 있음
+    콘솔스레드가 입력을 위해 대기 중일 수 있으므로 깨워줘야 함.
+    왜냐하면 stop()이 호출된 후에도 입력스레드가 블로킹 I/O 중이면 콘솔스레드는
+    입력이 올 때까지 대기 상태에 머무르게 되므로 종료되지 않기 때문.
+    괄호의 영역에서 inputMutex_를 잠그고 inputReady_를 true로 설정하여
+    콘솔 스레드가 대기 중인 조건변수를 깨우는 역할을 수행한다.
+    */
     {
         std::lock_guard<std::mutex> lock(inputMutex_);
         inputReady_ = true;
     }
-    inputCv_.notify_all();
+#ifdef __unix__
+    // Close stdin to interrupt blocking std::getline in the input thread so it can exit.
+    // Note: closing STDIN_FILENO affects the whole process; acceptable here to force prompt shutdown.
+    ::close(STDIN_FILENO);
+#endif
+    inputCv_.notify_all();      // 다음 코드의 join이 정상동작하도록 깨움.
 
     // 처리 스레드는 안전하게 join
     if (consoleThread_.joinable())
@@ -47,10 +83,10 @@ void ConsoleInterface::stop()
         consoleThread_.join();
     }
 
-    // 입력 스레드는 블로킹 중일 수 있으므로 detach
+    // 입력 스레드는 블로킹 중일 수 있으므로 안전하게 join
     if (inputThread_.joinable())
     {
-        inputThread_.detach();
+        inputThread_.join();
     }
 }
 
@@ -64,7 +100,8 @@ void ConsoleInterface::inputLoop()
     while (running_.load(std::memory_order_acquire))
     {
         std::string line;
-        if (!std::getline(std::cin, line))
+        // 블로킹 입력
+        if (!std::getline(std::cin, line))      // 한줄 읽기 실패 여부
         {
             // EOF - 종료 요청으로 처리
             {
@@ -75,7 +112,7 @@ void ConsoleInterface::inputLoop()
             inputCv_.notify_one();
             break;
         }
-
+        
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
             currentInput_ = std::move(line);
@@ -85,10 +122,15 @@ void ConsoleInterface::inputLoop()
 
         // 처리 완료 대기
         {
+            /*
+            4) 왜 unique_lock이지 lock_guard가 아닌가?
+            lock_guard는 잠그면 끝까지 잠금 유지(수동 unlock 불가)
+            wait는 잠드는 동안 락을 풀어야 하므로
+            unique_lock처럼 “락을 풀었다가 다시 잡을 수 있는” 타입이 필요합니다.
+            */
             std::unique_lock<std::mutex> lock(inputMutex_);
-            inputCv_.wait(lock, [this] {
-                return !inputReady_ || !running_.load(std::memory_order_acquire);
-            });
+            inputCv_.wait(lock, [this]() { 
+                return !inputReady_ || !running_.load(std::memory_order_acquire); });
         }
     }
 }
@@ -106,21 +148,20 @@ void ConsoleInterface::consoleLoop()
         std::string input;
         {
             std::unique_lock<std::mutex> lock(inputMutex_);
-            inputCv_.wait(lock, [this] {
-                return inputReady_ || !running_.load(std::memory_order_acquire);
-            });
+            inputCv_.wait(lock, [this]() { 
+                return inputReady_ || !running_.load(std::memory_order_acquire); });
 
             if (!running_.load(std::memory_order_acquire))
             {
-                break;
+                break;  // 종료 요청
             }
 
-            input = std::move(currentInput_);
+            input = std::move(currentInput_);   // inputLoop에서 설정한 값 복사
             inputReady_ = false;
         }
-        inputCv_.notify_one();  // 입력 스레드 깨우기
+        inputCv_.notify_one();   // 입력 스레드 깨우기
 
-        input = trim(input);
+        input = trim(input);    // 앞뒤 공백 제거
         if (!input.empty())
         {
             processCommand(input);
@@ -133,7 +174,7 @@ void ConsoleInterface::showWelcome()
     static const std::string welcomeMessage =
         "\n"
         "╔══════════════════════════════════════════════════════════╗\n"
-        "║           SIPLite Server v0.1 - 콘솔 인터페이스           ║\n"
+        "║           SIPLite Server v0.1 - 콘솔 인터페이스          ║\n"
         "╚══════════════════════════════════════════════════════════╝\n"
         "\n";
     std::cout << welcomeMessage;
@@ -158,31 +199,55 @@ void ConsoleInterface::showMenu()
 bool ConsoleInterface::validateConsoleInput(const std::string& input)
 {
     if (input.size() > 64)
+    {
         return false;
+    }
+
     for (char c : input)
     {
+        // 허용되는 문자: 영문자, 숫자, 공백, 일부 특수문자(- _ ? .)
+        // isalnum은 locale 영향을 받을 수 있으므로 unsigned char로 캐스팅
+        // ASCII 범위 밖 문자는 모두 거부
+        // 즉, 한글 등은 허용하지 않음
+        // std::isalnum은 구현에 따라 char가 음수일 때 UB가 될 수 있으므로, 
+        // 반드시 unsigned char로 캐스트해서 전달해야 안전합니다.
         if (!std::isalnum(static_cast<unsigned char>(c)) &&
-            c != ' ' && c != '-' && c != '_' && c != '?' && c != '.')
+                                                c != ' ' && 
+                                                c != '-' && 
+                                                c != '_' && 
+                                                c != '?' && 
+                                                c != '.')
         {
             return false;
         }
     }
+
     return true;
 }
 
+// 로그 인젝션 방지용 출력 정화
+// 제어문자 및 비ASCII 문자를 '?'로 대체하고 최대 길이 제한
+// 초과 시 "..." 추가
+// 기본 최대 길이 50
+// 예: "Hello, World!\n" -> "Hello, World!?"
+// "This is a very long message that exceeds the maximum length." -> "This is a very long message that exceeds the ma..."
+// "Non-ASCII: ñ, ü, 漢字" -> "Non-ASCII: ?, ?, ??"
 std::string ConsoleInterface::sanitizeOutput(const std::string& input, std::size_t maxLen)
 {
     std::string result;
+    // 미리 용량 할당
     result.reserve(std::min(input.size(), maxLen));
 
     for (char c : input)
     {
+        // 최대 길이 초과 시 "..." 추가 후 종료
         if (result.size() >= maxLen)
         {
             result += "...";
             break;
         }
 
+        // ASCII 인쇄 가능한 문자만 허용
         if (c >= 32 && c < 127)
         {
             result += c;

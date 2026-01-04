@@ -12,9 +12,22 @@
 #include <iostream>
 #include <mutex>
 
-namespace {
+// static 변수 대신에 namespace 사용
+namespace
+{
     std::mutex g_logMutex;
-    constexpr std::size_t RECV_BUFFER_SIZE = 2048;  // UDP 수신 버퍼 크기
+
+    /*
+    constexpr : 반드시 컴파일 타임에 값이 결정되어야 한다.
+    const : 런타임에 결정될 수 있지만, 변경되지 않는 값을 나타낸다.
+
+    constexpr 장점
+    1. 배열크기, 템플릿 인자 등의 컴파일 타임 상수가 필요한 곳에 사용가능
+    2. 컴파일러 최적화에 유리 (컴파일러가 값을 미리 알고 있음)
+    3. 타입 안전한 매크로 대체 (#define 대신 사용)
+    */
+
+    constexpr std::size_t RECV_BUFFER_SIZE = 2048; // UDP 수신 버퍼 크기
     constexpr std::size_t MAX_LOG_DATA_LENGTH = 200; // 로그 출력 최대 길이
 
     // 스레드 안전한 로그 에러 로깅 (perror 대체)
