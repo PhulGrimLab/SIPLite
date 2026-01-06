@@ -11,6 +11,18 @@ TARGET = $(BUILD_DIR)/my_siplite
 # 소스 파일 찾기
 SRCS = $(wildcard $(SRC_DIR)/*.cpp)
 OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(SRCS))
+# 라이브러리 오브젝트 (실제 바이너리의 main을 제외)
+LIB_OBJS = $(filter-out $(BUILD_DIR)/main.o, $(OBJS))
+
+# 테스트 바이너리
+TEST_DIR = tests
+TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
+TEST_OBJS = $(patsubst $(TEST_DIR)/%.cpp, $(BUILD_DIR)/test_%.o, $(TEST_SRCS))
+TEST_TARGET = $(BUILD_DIR)/test_parser
+
+# Additional test targets
+TEST_UTIL_TARGET = $(BUILD_DIR)/test_utils
+
 
 # 기본 타겟
 all: $(BUILD_DIR) $(TARGET)
@@ -23,8 +35,28 @@ $(BUILD_DIR):
 $(TARGET): $(OBJS)
 	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
 
+# Parser test binary (link only parser test object to avoid multiple mains)
+$(TEST_TARGET): $(BUILD_DIR)/test_test_parser.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# Utils test binary (link only utils test object)
+$(TEST_UTIL_TARGET): $(BUILD_DIR)/test_test_utils.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# SipCore test binary
+TEST_SIPCORE_TARGET = $(BUILD_DIR)/test_sipcore
+
+TEST_SIPCORE_OBJ = $(BUILD_DIR)/test_test_sipcore.o
+
+$(TEST_SIPCORE_TARGET): $(TEST_SIPCORE_OBJ) $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
 # 오브젝트 파일 컴파일
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# 테스트 오브젝트 파일 컴파일
+$(BUILD_DIR)/test_%.o: $(TEST_DIR)/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # 클린업
@@ -47,4 +79,8 @@ release: all
 run: all
 	./$(TARGET)
 
-.PHONY: all clean rebuild debug release run
+# Run parser tests
+test: $(TEST_TARGET)
+	$(TEST_TARGET)
+
+.PHONY: all clean rebuild debug release run test
