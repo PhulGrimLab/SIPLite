@@ -159,9 +159,12 @@ namespace UdpClientTester
                 for (int i = 0; i < sendCount && !ct.IsCancellationRequested; i++)
                 {
                     await SendPacketAsync(packetSize, ct);
-                    
+
+                    // 지정된 간격 대기
                     if (interval > 0)
+                    {
                         await Task.Delay(interval, ct);
+                    }
                 }
                 iteration++;
                 
