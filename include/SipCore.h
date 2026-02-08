@@ -330,11 +330,11 @@ public:
     
     struct ServerStats
     {
-        std::size_t registrationCount = 0;
-        std::size_t activeRegistrationCount = 0;  // 만료되지 않은 것만
-        std::size_t activeCallCount = 0;
-        std::size_t confirmedCallCount = 0;
-        std::size_t pendingCallCount = 0;
+        std::size_t registrationCount = 0;          // 전체 등록 수
+        std::size_t activeRegistrationCount = 0;    // 만료되지 않은 등록 수
+        std::size_t activeCallCount = 0;            // 현재 활성 통화 수
+        std::size_t confirmedCallCount = 0;         // ACK 받은 것
+        std::size_t pendingCallCount = 0;           // ACK 대기 중인 것 (미확립)
     };
     
     // 통계 정보 일괄 조회 (락 최소화)
@@ -418,7 +418,9 @@ public:
             {
                 return false;
             }
-            regs_[aor] = reg;
+
+            // reg값을 아래 라인 이후에는 사용하지 않기 때문에, std::move 가능
+            regs_[aor] = std::move(reg);
         }
         
         return true;
