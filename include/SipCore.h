@@ -40,8 +40,9 @@ namespace SipConstants
 
 enum class SipType { Request, Response, Invalid };
 
-struct SipMessage {
-    // 명시적 생성자/소멸자
+struct SipMessage 
+{
+    // 명시적 생성자 / 소멸자
     SipMessage() = default;
     ~SipMessage() = default;
     
@@ -50,20 +51,20 @@ struct SipMessage {
     SipMessage(SipMessage&&) = default;
     SipMessage& operator=(SipMessage&&) = default;
 
-    SipType type = SipType::Invalid;
+    SipType type = SipType::Invalid;                // 메시지 유형 - 기본은 Invalid
 
     // Request
-    std::string method;
-    std::string requestUri;
+    std::string method;                             // 요청 메서드
+    std::string requestUri;                         // 요청 URI
 
     // Response
-    int statusCode = 0;
-    std::string reasonPhrase;
+    int statusCode = 0;                             // 상태 코드
+    std::string reasonPhrase;                       // 이유 구문
 
-    // 공통
-    std::string sipVersion;
-    std::map<std::string, std::string> headers; // key: 소문자 헤더 이름
-    std::string body;
+    // 공통 필드
+    std::string sipVersion = "SIP/2.0";             // SIP 버전 - 기본은 SIP/2.0
+    std::map<std::string, std::string> headers;     // 헤더 맵
+    std::string body;                               // 메시지 바디    
 };
 
 // REGISTER 정보
@@ -194,7 +195,6 @@ public:
     // ================================
     // 안전한 조회 함수 (복사본 반환)
     // ================================
-    
     std::optional<Registration> findRegistrationSafe(const std::string& aor) const
     {
         std::lock_guard<std::mutex> lock(regMutex_);
@@ -323,45 +323,48 @@ public:
         std::lock_guard<std::mutex> lock(callMutex_);
         return activeCalls_.size();
     }
-    
+
     // ================================
     // 통계 정보 구조체 (한 번에 조회)
     // ================================
-    
+
     struct ServerStats
     {
-        std::size_t registrationCount = 0;          // 전체 등록 수
-        std::size_t activeRegistrationCount = 0;    // 만료되지 않은 등록 수
-        std::size_t activeCallCount = 0;            // 현재 활성 통화 수
-        std::size_t confirmedCallCount = 0;         // ACK 받은 것
-        std::size_t pendingCallCount = 0;           // ACK 대기 중인 것 (미확립)
+        std::size_t registrationCount = 0;          // 전체 등록된 사용자 수
+        std::size_t activeRegistrationCount = 0;    // 만료되지 않은 활성 등록 수
+        std::size_t activeCallCount = 0;            // 전체 활성 통화 수
+        std::size_t confirmedCallCount = 0;         // ACK 받은 것만 카운트
+        std::size_t pendingCallCount = 0;           // 미확립 통화 수
     };
-    
+
     // 통계 정보 일괄 조회 (락 최소화)
     ServerStats getStats() const
     {
         ServerStats stats;
         const auto now = std::chrono::steady_clock::now();
-        
+
         // 등록 통계
         {
             std::lock_guard<std::mutex> lock(regMutex_);
             stats.registrationCount = regs_.size();
-            
+
             for (const auto& [aor, reg] : regs_)
             {
                 if (reg.expiresAt > now)
                 {
                     ++stats.activeRegistrationCount;
+                    /*
+                    C++ 권고 사항: 반환값을 쓰지 않으면 전위를 사용하는 것이 좋다.
+                    */
                 }
             }
         }
-        
+
         // 통화 통계
         {
             std::lock_guard<std::mutex> lock(callMutex_);
             stats.activeCallCount = activeCalls_.size();
-            
+
             for (const auto& [callId, call] : activeCalls_)
             {
                 if (call.confirmed)
@@ -374,26 +377,26 @@ public:
                 }
             }
         }
-        
+
         return stats;
     }
 
     // ================================
     // 프로그래매틱 단말 등록 (XML 설정용)
     // ================================
-    
+
     bool registerTerminal(const std::string& aor,
                           const std::string& contact,
                           const std::string& ip,
                           uint16_t port,
-                          int expiresSec = 3600)
+                          int expiresSec = SipConstants::DEFAULT_EXPIRES_SEC)
     {
         if (aor.empty() || ip.empty())
         {
-            return false;
+            return false; // 필수 매개변수 누락
         }
-        
-        // Expires 범위 검증
+
+
         if (expiresSec < 0)
         {
             expiresSec = 0;
@@ -402,27 +405,27 @@ public:
         {
             expiresSec = SipConstants::MAX_EXPIRES_SEC;
         }
-        
+
         Registration reg;
         reg.aor = aor;
         reg.contact = contact.empty() ? aor : contact;
         reg.ip = ip;
         reg.port = port;
-        reg.expiresAt = std::chrono::steady_clock::now() + 
-                        std::chrono::seconds(expiresSec);
-        
+        reg.expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(expiresSec);
+
         {
             std::lock_guard<std::mutex> lock(regMutex_);
+
             if (regs_.find(aor) == regs_.end() && 
                 regs_.size() >= SipConstants::MAX_REGISTRATIONS)
             {
-                return false;
+                return false; // 최대 등록 수 초과
             }
 
             // reg값을 아래 라인 이후에는 사용하지 않기 때문에, std::move 가능
             regs_[aor] = std::move(reg);
         }
-        
+
         return true;
     }
     
@@ -543,7 +546,7 @@ private:
 private:
     mutable std::mutex regMutex_;
     std::map<std::string, Registration> regs_;
-    
+
     mutable std::mutex callMutex_;
     std::map<std::string, ActiveCall> activeCalls_;
 
