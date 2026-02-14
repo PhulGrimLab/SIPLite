@@ -269,6 +269,8 @@ void ConsoleInterface::processCommand(const std::string& cmd)
         return;
     }
 
+    std::cout << "\n입력값 = " << sanitizeOutput(cmd) << "\n";
+
     if (cmd == "1" || cmd == "status")
     {
         showServerStatus();
@@ -297,6 +299,7 @@ void ConsoleInterface::processCommand(const std::string& cmd)
 
 void ConsoleInterface::showServerStatus()
 {
+    // 서버 상태 정보 출력
     auto& sipCore = server_.sipCore();
     const auto stats = sipCore.getStats();
 
@@ -310,8 +313,7 @@ void ConsoleInterface::showServerStatus()
 #else
     localtime_r(&time, &tmBuf);
 #endif
-    if (std::strftime(timeBuf.data(), timeBuf.size(),
-                      "%Y-%m-%d %H:%M:%S", &tmBuf) == 0)
+    if (std::strftime(timeBuf.data(), timeBuf.size(), "%Y-%m-%d %H:%M:%S", &tmBuf) == 0)
     {
         std::snprintf(timeBuf.data(), timeBuf.size(), "N/A");
     }
@@ -338,6 +340,7 @@ void ConsoleInterface::showServerStatus()
 
 void ConsoleInterface::showRegisteredTerminals()
 {
+    // 등록된 단말 정보 출력
     auto& sipCore = server_.sipCore();
     const auto registrations = sipCore.getAllRegistrations();
     const auto now = std::chrono::steady_clock::now();
@@ -386,6 +389,7 @@ void ConsoleInterface::showRegisteredTerminals()
 
 void ConsoleInterface::showActiveCalls()
 {
+    // 활성 통화 정보 출력
     auto& sipCore = server_.sipCore();
     const auto calls = sipCore.getAllActiveCalls();
     const auto now = std::chrono::steady_clock::now();
@@ -398,7 +402,7 @@ void ConsoleInterface::showActiveCalls()
 
     if (calls.empty())
     {
-        oss << "│  진행 중인 통화가 없습니다.                                                  │\n";
+        oss << "│  활성 통화가 없습니다.                                       │\n";
     }
     else
     {
@@ -468,6 +472,15 @@ void ConsoleInterface::handleExit()
     running_.store(false, std::memory_order_release);
 }
 
+/*
+[문자열 앞뒤 공백 제거 함수 설명]
+공백 문자( , \t, \r, \n)를 기준으로 문자열의 **앞(leading)**과 뒤(trailing) 공백을 제거합니다.
+find_first_not_of로 첫 번째 비공백 위치를, 
+find_last_not_of로 마지막 비공백 위치를 찾아 그 사이 부분문자열을 반환합니다.
+전체가 공백이면 빈 문자열 ""을 반환합니다.
+[consoleLoop[](src/ConsoleInterface.cpp)에서 사용자 입력을 정리할 때 호출됩니다: ]
+(http://_vscodecontentref_/4)input = trim(input);
+*/
 std::string ConsoleInterface::trim(std::string_view s)
 {
     constexpr std::string_view ws = " \t\r\n";
@@ -480,19 +493,36 @@ std::string ConsoleInterface::trim(std::string_view s)
     return std::string(s.substr(start, end - start + 1));
 }
 
+/*
+[문자열 자르기 함수 설명]
+문자열이 maxLen보다 길면 잘라내고 ..을 붙여 최대 길이 내로 맞춥니다.
+maxLen < 3이면 .. 접미사 없이 단순 잘라냄 (접미사 넣을 공간이 부족하므로).
+콘솔 테이블에서 AOR, Call-ID 등을 고정 폭 컬럼에 맞춰 출력할 때 사용됩니다.
+예: truncate("sip:1001@192.168.1.100", 20) → "sip:1001@192.168.."
+*/
 std::string ConsoleInterface::truncate(std::string_view s, std::size_t maxLen)
 {
     if (s.length() <= maxLen)
     {
         return std::string(s);
     }
+
     if (maxLen < 3)
     {
         return std::string(s.substr(0, maxLen));
     }
+
     return std::string(s.substr(0, maxLen - 2)) + "..";
 }
 
+/*
+[SIP URI 사용자 추출 함수 설명]
+SIP URI 형식 sip:사용자@도메인에서 사용자 부분만 추출합니다.
+:와 @의 위치를 찾아 그 사이 문자열을 반환합니다.
+패턴이 맞지 않으면 원본 URI를 그대로 반환합니다.
+예: extractUser("sip:1001@192.168.1.100") → "1001"
+showActiveCalls에서 발신자/수신자 표시에 사용됩니다.
+*/
 std::string ConsoleInterface::extractUser(std::string_view uri)
 {
     const auto colonPos = uri.find(':');
@@ -507,6 +537,17 @@ std::string ConsoleInterface::extractUser(std::string_view uri)
     return std::string(uri);
 }
 
+/*
+[남은 시간 포맷 함수 설명]
+남은 시간을 초 단위로 받아 사람이 읽을 수 있는 형식으로 변환합니다.
+0~59초는 "X초", 60~3599초는 "Y분", 3600초 이상은 "Z시간"으로 표시합니다.
+음수인 경우 "만료됨"으로 표시합니다.
+showRegisteredTerminals에서 등록 만료까지 남은 시간 표시할 때 사용됩니다.
+예: formatRemainingTime(45) → "45초", 
+formatRemainingTime(120) → "2분", 
+formatRemainingTime(7200) → "2시간", 
+formatRemainingTime(-5) → "만료됨"
+*/
 std::string ConsoleInterface::formatRemainingTime(long remaining)
 {
     if (remaining <= 0)
@@ -527,9 +568,17 @@ std::string ConsoleInterface::formatRemainingTime(long remaining)
     {
         std::snprintf(buf.data(), buf.size(), "%ld시간", remaining / 3600);
     }
+
     return std::string(buf.data());
 }
 
+/*
+[통화 지속 시간 포맷 함수 설명]
+통화 지속 시간을 초 단위로 받아 사람이 읽을 수 있는 형식으로 변환합니다.
+0~59초는 "X초", 60초 이상은 "Y분 Z초"로 표시합니다.
+showActiveCalls에서 통화 상태에 "통화중 X분 Y초" 형식으로 표시할 때 사용됩니다.
+예: formatDuration(45) → "45초", formatDuration(125) → "2분 5초"
+*/
 std::string ConsoleInterface::formatDuration(long seconds)
 {
     std::array<char, 24> buf{};
@@ -539,8 +588,8 @@ std::string ConsoleInterface::formatDuration(long seconds)
     }
     else
     {
-        std::snprintf(buf.data(), buf.size(), "%ld분 %ld초",
-                     seconds / 60, seconds % 60);
+        std::snprintf(buf.data(), buf.size(), "%ld분 %ld초", seconds / 60, seconds % 60);
     }
+
     return std::string(buf.data());
 }
