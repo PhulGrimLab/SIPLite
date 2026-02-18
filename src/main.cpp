@@ -58,19 +58,19 @@ namespace
             std::cerr << "[오류] 잘못된 경로 길이\n";
             return false;
         }
-        
+
         // 널 바이트 체크
         if (path.find('\0') != std::string::npos)
         {
             std::cerr << "[오류] 경로에 널 바이트 포함\n";
             return false;
         }
-        
+
         // 다양한 경로 순회 패턴 체크
         std::string lowerPath = path;
         std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
-                      [](unsigned char c) { return std::tolower(c); });
-        
+                       [](unsigned char c) { return std::tolower(c); });
+
         const char* dangerousPatterns[] = {
             "..", "..\\" , "../",
             "%2e%2e", "%2e%2e%2f", "%2e%2e%5c",
@@ -79,7 +79,7 @@ namespace
             "/etc/", "/proc/", "/sys/", "/dev/",
             "c:\\windows", "\\\\"
         };
-        
+
         for (const auto& pattern : dangerousPatterns)
         {
             if (lowerPath.find(pattern) != std::string::npos)
@@ -88,22 +88,22 @@ namespace
                 return false;
             }
         }
-        
+
         try
         {
             std::filesystem::path p(path);
-            
+
             // 확장자 검증
             std::string ext = p.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(),
                           [](unsigned char c) { return std::tolower(c); });
-            
+
             if (ext != ".xml")
             {
                 std::cerr << "[오류] XML 파일만 허용됩니다\n";
                 return false;
             }
-            
+
             // 심볼릭 링크 체크
             std::error_code ec;
             if (std::filesystem::exists(path, ec) && !ec)
@@ -145,6 +145,7 @@ int main(int argc, char* argv[])
         }
     }
 
+
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════════════════════╗\n";
     std::cout << "║              SIPLite Server v0.1 시작 중...              ║\n";
@@ -173,7 +174,7 @@ int main(int argc, char* argv[])
     Logger::instance().info("[Logger] Log retention days: " + std::to_string(retentionDays));
     UdpServer server;
     const std::string bindIp = "0.0.0.0";
-    const uint16_t bindPort = 5060;
+    const uint16_t bindPort = 5060;     // 표준 SIP 포트
     const std::size_t workerCount = 4;
 
     // 단말 설정 로드

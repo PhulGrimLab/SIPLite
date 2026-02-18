@@ -31,7 +31,6 @@ struct TerminalConfig
 // ================================
 // XML 설정 로더 (보안 강화 버전)
 // ================================
-
 class XmlConfigLoader
 {
 public:
@@ -48,8 +47,8 @@ public:
     static std::vector<TerminalConfig> loadTerminals(const std::string& filePath)
     {
         std::vector<TerminalConfig> terminals;
-        terminals.reserve(64);
-        
+        terminals.reserve(64); // 초기 용량 예약
+
         // 경로 보안 검증
         if (!validateFilePath(filePath))
         {
@@ -237,6 +236,7 @@ private:
         
         // 경로를 소문자로 변환하여 패턴 검사
         std::string lowerPath = path;
+        // 소문자로 변환 (대소문자 구분 없이 검사하기 위해)
         std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
                       [](unsigned char c) { return std::tolower(c); });
         
@@ -259,6 +259,10 @@ private:
         // 허용된 확장자만
         std::filesystem::path p(path);
         std::string ext = p.extension().string();
+        /*
+        구조: std::transform(시작1, 끝1, 결과저장시작, 변환함수).
+        주의: 결과 저장 공간(result)은 미리 크기가 할당(resize)되어 있거나 std::back_inserter를 사용해야 함. 
+        */
         std::transform(ext.begin(), ext.end(), ext.begin(),
                       [](unsigned char c) { return std::tolower(c); });
         
@@ -271,6 +275,7 @@ private:
     }
     
     // XML 콘텐츠 보안 검증 (XXE 방지)
+    //  XXE(XML External Entity) 공격과 SSRF(Server-Side Request Forgery) 방지를 위한 것입니다.
     static bool validateXmlContent(const std::string& content)
     {
         // 위험한 XML 패턴 체크 (대소문자 무시)

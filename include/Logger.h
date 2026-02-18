@@ -5,7 +5,7 @@
 #include <mutex>
 #include <atomic>
 
-class Logger 
+class Logger
 {
 public:
     static Logger& instance();
@@ -24,7 +24,7 @@ private:
     Logger();
     ~Logger();
     Logger(const Logger&) = delete;
-    Logger& operator=(const Logger&) = delete; 
+    Logger& operator=(const Logger&) = delete;
 
     void rotateIfNeeded();
     void purgeOldLogs();

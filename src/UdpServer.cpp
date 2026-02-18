@@ -355,25 +355,31 @@ void UdpServer::workerLoop(std::size_t workerId)
     }
 
     // Periodic cleanup of stale transactions
-    try {
+    try
+    {
         std::size_t removed = sipCore_.cleanupStaleTransactions();
-        if (removed > 0) {
-            std::lock_guard<std::mutex> lock(g_logMutex);
+
+        if (removed > 0)
+        {
+            std::lock_guard<std::mutex> lock(g_logMutex);  
             std::cout << "[UdpServer] cleanupStaleTransactions removed " << removed << " entries\n";
         }
-    } catch (...) {
+    }
+    catch(...)
+    {
         // be defensive: cleanup must not throw
     }
 
     Logger::instance().info(std::string("[UdpServer] Worker ") + std::to_string(workerId) + " ended");
 }
 
+// 실제 패킷 처리 로직
 void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
 {
     // 패킷 크기 검증 (최소 SIP 메시지 크기: "SIP/2.0 200 OK\r\n\r\n" ≈ 20 바이트)
     constexpr std::size_t MIN_SIP_SIZE = 20;
     constexpr std::size_t MAX_SIP_SIZE = 65536;  // 64KB
-    
+
     if (pkt.data.size() < MIN_SIP_SIZE)
     {
         std::lock_guard<std::mutex> lock(g_logMutex);
@@ -391,7 +397,7 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
                   << " (" << pkt.data.size() << " bytes)\n";
         return;
     }
-    
+
     // 수신 로그 (정화된 데이터)
     {
         std::lock_guard<std::mutex> lock(g_logMutex);
@@ -406,12 +412,13 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
     if (!parseSipMessage(pkt.data, msg))
     {
         // SIP 메시지가 아니면 에코 모드
-        if (sendTo(pkt.remoteIp, pkt.remotePort, pkt.data)) 
+        if (sendTo(pkt.remoteIp, pkt.remotePort, pkt.data))
         {
             std::lock_guard<std::mutex> lock(g_logMutex);
             std::cout << "[Worker " << workerId << "] Echo sent to "
                       << pkt.remoteIp << ":" << pkt.remotePort << "\n";
         }
+
         return;
     }
 
@@ -423,14 +430,14 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
             if (!response.empty())
             {
                 // 응답 전송
-                if (sendTo(pkt.remoteIp, pkt.remotePort, response)) 
+                if (sendTo(pkt.remoteIp, pkt.remotePort, response))
                 {
                     std::lock_guard<std::mutex> lock(g_logMutex);
                     std::cout << "[Worker " << workerId << "] SIP response sent to "
                               << pkt.remoteIp << ":" << pkt.remotePort << "\n";
                     std::cout << sanitizeLogData(response) << "\n";
-                } 
-                else 
+                }
+                else
                 {
                     std::lock_guard<std::mutex> lock(g_logMutex);
                     std::cerr << "[Worker " << workerId << "] Failed to send SIP response\n";
@@ -465,6 +472,7 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
             std::cerr << "[Worker " << workerId << "] Unhandled SIP response\n";
         }
     }
+    
 }
 
 bool UdpServer::sendTo(const std::string& ip, uint16_t port, const std::string& data)

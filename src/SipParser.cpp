@@ -10,53 +10,52 @@ bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
 {
     try
     {
-        out = SipMessage{};
+        out = SipMessage{}; // 초기화
 
         // 입력 크기 검증
-        if (raw.empty() || raw.size() > SipConstants::MAX_MESSAGE_SIZE)
+        if (raw.empty() || (raw.size() > SipConstants::MAX_MESSAGE_SIZE))
         {
-            return false;
+            return false; // 메시지가 비어 있거나, 크기 초과
         }
 
-        // 헤더/바디 분리
+        // 헤더 / 바디 분리
         std::size_t headerEnd = raw.find("\r\n\r\n");
         if (headerEnd == std::string::npos)
         {
-            return false;
+            return false; // 헤더-바디 구분자 없으면 비정상
         }
 
         // 헤더 크기 검증
         if (headerEnd > SipConstants::MAX_HEADER_SIZE)
         {
-            return false;
-        }
+            return false; // 헤더 크기 초과
+        }   
 
         std::string headerPart = raw.substr(0, headerEnd);
-        std::string bodyPart   = raw.substr(headerEnd + 4);
+        std::string bodyPart = raw.substr(headerEnd + 4); // "\r\n\r\n" 길이만큼 건너뛰기
 
-        // 바디 크기 검증
+        // 바디 검증
         if (bodyPart.size() > SipConstants::MAX_BODY_SIZE)
         {
-            return false;
+            return false; // 바디 크기 초과
         }
 
-        // 첫 줄 (Request-Line 또는 Status-Line)
+        // 첫줄 파싱 (Request-Line 또는 Status-Line)
         std::size_t firstLineEnd = headerPart.find("\r\n");
         if (firstLineEnd == std::string::npos)
         {
-            return false;
+            return false; // 첫 줄이 없으면 비정상
         }
 
         std::string firstLine = headerPart.substr(0, firstLineEnd);
-        firstLine = trim(firstLine);
-
+        firstLine  = trim(firstLine); // 양쪽 공백 제거
         if (firstLine.empty())
         {
-            return false;
+            return false; // 첫 줄이 비어 있으면 비정상
         }
 
-        // Response 인지 Request인지 판별
-        if (firstLine.rfind("SIP/2.0", 0) == 0)
+        // Response인지 Request인지 구분
+        if (firstLine.rfind("SIP/2.0", 0) == 0) // "SIP/2.0"으로 시작하면 Response
         {
             // Response: "SIP/2.0 200 OK"
             std::istringstream iss(firstLine);
@@ -67,19 +66,13 @@ bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
             out.sipVersion   = proto;
             out.type         = SipType::Response;
 
-            // SIP 버전 검증
-            if (!isValidSipVersion(out.sipVersion))
-            {
-                return false;
-            }
-
             // 상태 코드 유효성 검증
             if (!isValidStatusCode(out.statusCode))
             {
                 return false;
             }
         }
-        else
+        else // 그렇지 않으면 Request로 간주
         {
             // Request: "INVITE sip:1002@server SIP/2.0"
             std::istringstream iss(firstLine);
@@ -93,17 +86,17 @@ bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
                 return false;
             }
 
-            // SIP 버전 검증
-            if (!isValidSipVersion(out.sipVersion))
-            {
-                return false;
-            }
-
             // Request URI 검증
             if (!isValidRequestUri(out.requestUri))
             {
                 return false;
             }
+        }
+
+        // SIP 버전 검증
+        if (!isValidSipVersion(out.sipVersion))
+        {
+            return false;
         }
 
         // 헤더들 파싱
@@ -171,4 +164,5 @@ bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
         out = SipMessage{};
         return false;
     }
+    
 }

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <charconv>
 
+// 왼쪽 공백 제거
 std::string ltrim(const std::string& s)
 {
     std::size_t i = 0;
@@ -16,6 +17,7 @@ std::string ltrim(const std::string& s)
     return s.substr(i);
 }
 
+// 오른쪽 공백 제거
 std::string rtrim(const std::string& s)
 {
     if (s.empty())
@@ -32,11 +34,13 @@ std::string rtrim(const std::string& s)
     return s.substr(0, i);
 }
 
+// 양쪽 공백 제거
 std::string trim(const std::string& s)
 {
     return rtrim(ltrim(s));
 }
 
+// 문자열을 소문자로 변환
 std::string toLower(const std::string& s)
 {
     std::string out;
@@ -49,6 +53,9 @@ std::string toLower(const std::string& s)
     return out;
 }
 
+// SIP 메시지에서 특정 헤더 값 가져오기 (대소문자 구분 없이)
+// 예: getHeader(msg, "From") -> "Alice <sip:user@example.com>"
+// SIP 메시지의 헤더는 대소문자 구분 없이 검색할 수 있도록, 내부적으로 모든 헤더 이름을 소문자로 저장한다고 가정합니다.
 std::string getHeader(const SipMessage& msg, const std::string& name)
 {
     auto it = msg.headers.find(toLower(name));
@@ -60,6 +67,11 @@ std::string getHeader(const SipMessage& msg, const std::string& name)
     return it->second;
 }
 
+// SIP 메시지의 헤더 값에서 CR, LF, NULL 문자를 제거하여 정화된 문자열 반환
+// SIP 메시지의 헤더 값은 로그에 출력할 때 문제가 될 수 있는 제어 문자를 포함할 수 있습니다.
+// 이 함수는 헤더 값에서 CR, LF, NULL 문자를 제거하여 로그에 출력할 때 안전한 문자열로 변환하는 역할을 합니다.
+// 예: "Alice\r\n" -> "Alice", "Bob\0Smith" -> "BobSmith"
+// SIP 메시지 데이터에서 출력 가능한 ASCII 문자와 일부 공백 문자를 유지하면서, 로그에 출력할 때 문제가 될 수 있는 비출력 문자를 정화하는 함수입니다.    
 std::string sanitizeHeaderValue(const std::string& value)
 {
     std::string result;
@@ -76,6 +88,12 @@ std::string sanitizeHeaderValue(const std::string& value)
     return result;
 }
 
+// 로그에 출력할 SIP 메시지 데이터 정화
+// SIP 메시지는 구조적으로 여러 줄로 구성되며, CR, LF, TAB 등의 제어 문자를 포함할 수 있습니다.
+// 이 함수는 SIP 메시지의 구조를 유지하면서, 로그에 출력할 때 문제가 될 수 있는 비출력 문자를 정화하는 역할을 합니다.
+// SIP 메시지의 각 줄은 CRLF로 구분되므로, CR과 LF는 유지하면서 다른 비출력 문자는 '.'으로 대체합니다. 
+// "INVITE sip:user@example.com SIP/2.0\r\n" -> "INVITE sip:user@example.com SIP/2.0"
+// "v=0\r\no=alice 2890844526 2890844526 IN IP4
 std::string extractUriFromHeader(const std::string& headerValue)
 {
     std::string v = headerValue;
@@ -104,6 +122,8 @@ std::string extractUriFromHeader(const std::string& headerValue)
     return std::string{};
 }
 
+// SIP URI에서 사용자 부분 추출
+// 예: "sip:user@example.com" -> "user"
 std::string extractUserFromUri(const std::string& uri)
 {
     std::string u = uri;
@@ -119,6 +139,11 @@ std::string extractUserFromUri(const std::string& uri)
     return trim(u.substr(start, atPos - start));
 }
 
+// SIP 메서드 유효성 검사
+// SIP 메서드는 RFC3261에서 정의된 메서드 집합에 속해야 합니다.
+// 예: "INVITE" -> valid, "FOO" -> invalid, "BYE" -> valid
+// SIP 메서드는 대문자로만 구성되어야 합니다.
+// SIP 메서드는 7비트 ASCII 대문자로만 구성되어야 하며, RFC3261에서 정의된 메서드 집합에 속해야 합니다.
 bool isValidSipMethod(const std::string& method)
 {
     static const std::unordered_set<std::string> validMethods = {
@@ -129,16 +154,26 @@ bool isValidSipMethod(const std::string& method)
     return validMethods.find(method) != validMethods.end();
 }
 
+// SIP 버전은 "SIP/2.0"만 유효
 bool isValidSipVersion(const std::string& version)
 {
     return version == "SIP/2.0";
 }
 
+// 상태 코드는 100-699 범위 내의 정수여야 합니다.
+// 예: 200 -> valid, 99 -> invalid, 700 -> invalid, 180 -> valid
+// SIP 상태 코드는 3자리 숫자여야 하며, 첫 자리는 1-6 사이여야 합니다.
+// RFC3261에서는 100-699 범위의 상태 코드만 정의되어 있습니다.
 bool isValidStatusCode(int code)
 {
     return code >= 100 && code <= 699;
 }
 
+// Request URI 기본 검증
+// SIP URI는 "sip:" 또는 "sips:"로 시작해야 하며, 256자 이하이어야 합니다. 
+// 또한, CR, LF, NULL 문자를 포함해서는 안 됩니다.
+// 예: "sip:user@example.com"  -> valid, 
+//"http://example.com" -> invalid, "sip:user@example.com\r" -> invalid   
 bool isValidRequestUri(const std::string& uri)
 {
     if (uri.empty() || uri.size() > 256)
@@ -162,6 +197,9 @@ bool isValidRequestUri(const std::string& uri)
     return true;
 }
 
+// To 헤더에 tag 없으면 tag=server 추가
+// SIP 메시지에 포함된 To 헤더에서 tag 파라미터가 없으면, 서버에서 자체적으로 tag=server를 추가하여 반환하는 함수입니다.
+// 예: "To: <sip:user@example.com>" -> "To: <sip:user@example.com>;tag=server"
 std::string ensureToTag(const std::string& to)
 {
     std::string sanitized = sanitizeHeaderValue(to);
@@ -171,9 +209,9 @@ std::string ensureToTag(const std::string& to)
         return sanitized;
     }
 
-    if (!sanitized.empty() && sanitized.back() == '>')
+    if (sanitized.empty())
     {
-        return sanitized + ";tag=server";
+        return sanitized;
     }
 
     return sanitized + ";tag=server";

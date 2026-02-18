@@ -45,7 +45,7 @@ struct SipMessage
     // 명시적 생성자 / 소멸자
     SipMessage() = default;
     ~SipMessage() = default;
-    
+
     SipMessage(const SipMessage&) = default;
     SipMessage& operator=(const SipMessage&) = default;
     SipMessage(SipMessage&&) = default;
@@ -428,19 +428,18 @@ public:
 
         return true;
     }
-    
+
     // ================================
     // 등록 정보 조회 (콘솔 출력용, 필터링 옵션 포함)
     // ================================
-    
     std::vector<Registration> getAllRegistrations(bool activeOnly = false) const
     {
         std::vector<Registration> result;
         std::lock_guard<std::mutex> lock(regMutex_);
         result.reserve(regs_.size());
-        
+
         const auto now = std::chrono::steady_clock::now();
-        
+
         for (const auto& [aor, reg] : regs_)
         {
             if (!activeOnly || reg.expiresAt > now)
@@ -448,19 +447,19 @@ public:
                 result.push_back(reg);
             }
         }
+
         return result;
     }
-    
+
     // ================================
     // 활성 통화 정보 조회 (콘솔 출력용, 필터링 옵션 포함)
     // ================================
-    
     std::vector<ActiveCall> getAllActiveCalls(bool confirmedOnly = false) const
     {
         std::vector<ActiveCall> result;
         std::lock_guard<std::mutex> lock(callMutex_);
         result.reserve(activeCalls_.size());
-        
+
         for (const auto& [callId, call] : activeCalls_)
         {
             if (!confirmedOnly || call.confirmed)
@@ -575,4 +574,5 @@ private:
 
     // Sender callback (set by UdpServer)
     SenderFn sender_;
+
 };
