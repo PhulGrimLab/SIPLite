@@ -519,6 +519,9 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         activeCalls_[callId] = call;
     }
 
+    // 프록시 Via가 추가된 INVITE를 먼저 생성 — CANCEL/ACK 생성 시에도 동일한 Via가 필요
+    std::string fwdInvite = addProxyVia(pkt.data);
+
     {
         std::lock_guard<std::mutex> lock(pendingInvMutex_);
         PendingInvite pi;
@@ -526,7 +529,8 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         pi.callerPort = pkt.remotePort;
         pi.calleeIp = regCopy.ip;
         pi.calleePort = regCopy.port;
-        pi.origRequest = pkt.data;
+        // 프록시 Via가 추가된 버전을 저장하여, CANCEL/ACK 생성 시 callee가 받은 Via와 일치하도록 함
+        pi.origRequest = fwdInvite;
         pi.ts = std::chrono::steady_clock::now();
         pi.state = TxState::TRYING;
         pi.lastResponse = buildSimpleResponse(msg, 100, "Trying");
@@ -536,8 +540,6 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
 
     if (sender_)
     {
-        // 프록시 Via 추가: callee의 응답이 프록시를 경유하도록 보장 (RFC 3261 §16.6)
-        std::string fwdInvite = addProxyVia(pkt.data);
         sender_(regCopy.ip, regCopy.port, fwdInvite);
     }
 
