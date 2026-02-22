@@ -86,6 +86,37 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
         return this->sendTo(ip, port, data);
     });
 
+    // 프록시 로컬 주소 설정 (Via 헤더 생성용)
+    // "0.0.0.0" 바인딩인 경우 실제 로컬 IP를 감지
+    std::string localIp = ip;
+    if (ip == "0.0.0.0")
+    {
+        int tmpSock = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (tmpSock >= 0)
+        {
+            struct sockaddr_in target{};
+            target.sin_family = AF_INET;
+            target.sin_port = htons(53);
+            ::inet_pton(AF_INET, "8.8.8.8", &target.sin_addr);
+            if (::connect(tmpSock, reinterpret_cast<struct sockaddr*>(&target), sizeof(target)) == 0)
+            {
+                struct sockaddr_in local{};
+                socklen_t len = sizeof(local);
+                if (::getsockname(tmpSock, reinterpret_cast<struct sockaddr*>(&local), &len) == 0)
+                {
+                    char buf[INET_ADDRSTRLEN];
+                    if (::inet_ntop(AF_INET, &local.sin_addr, buf, sizeof(buf)))
+                    {
+                        localIp = buf;
+                    }
+                }
+            }
+            ::close(tmpSock);
+        }
+    }
+    sipCore_.setLocalAddress(localIp, port);
+    Logger::instance().info("[UdpServer] Proxy local address: " + localIp + ":" + std::to_string(port));
+
     // 수신 스레드 시작
     recvThread_ = std::thread(&UdpServer::recvLoop, this);
 

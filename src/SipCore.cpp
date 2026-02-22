@@ -1,5 +1,6 @@
 #include "SipCore.h"
 #include "SipParser.h"
+#include "Logger.h"
 
 #include <sstream>
 #include <algorithm>
@@ -111,13 +112,18 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
         auto it = pendingInvites_.find(key);
         if (it == pendingInvites_.end())
         {
+            Logger::instance().info("[handleResponse] pendingInvite not found: key=" + key
+                + " status=" + std::to_string(msg.statusCode)
+                + " from=" + pkt.remoteIp + ":" + std::to_string(pkt.remotePort)
+                + " pendingCount=" + std::to_string(pendingInvites_.size()));
             return false;
         }
 
         // Collect forwarding info (send outside lock)
+        // 프록시가 추가한 Via를 제거하여 caller에게 전달 (RFC 3261 §16.7)
         fwdIp = it->second.callerIp;
         fwdPort = it->second.callerPort;
-        fwdData = pkt.data;
+        fwdData = removeTopVia(pkt.data);
 
         // 상태 코드에 따라 트랜잭션 상태 업데이트
         // 1xx: provisional 응답 → 상태를 PROCEEDING으로 업데이트
@@ -530,7 +536,9 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
 
     if (sender_)
     {
-        sender_(regCopy.ip, regCopy.port, pkt.data);
+        // 프록시 Via 추가: callee의 응답이 프록시를 경유하도록 보장 (RFC 3261 §16.6)
+        std::string fwdInvite = addProxyVia(pkt.data);
+        sender_(regCopy.ip, regCopy.port, fwdInvite);
     }
 
     // SIP 흐름 관리에 필요한 처리를 수행한 후, 
@@ -939,6 +947,66 @@ std::string SipCore::generateTag() const
     std::ostringstream oss;
     oss << std::hex << dis(gen);
     return oss.str();
+}
+
+// 프록시 Via 헤더 추가 (RFC 3261 §16.6)
+// INVITE를 callee에게 전달할 때, 프록시 자신의 Via를 최상단에 삽입하여
+// callee의 응답이 반드시 프록시를 경유하도록 보장한다.
+std::string SipCore::addProxyVia(const std::string& rawMsg) const
+{
+    auto pos = rawMsg.find("\r\n");
+    if (pos == std::string::npos) return rawMsg;
+
+    std::string branch = "z9hG4bK-proxy-" + generateTag();
+    std::string addr = localAddr_.empty() ? "127.0.0.1" : localAddr_;
+    uint16_t port = localPort_ ? localPort_ : 5060;
+
+    std::string via = "Via: SIP/2.0/UDP " + addr + ":" + std::to_string(port)
+                    + ";branch=" + branch + ";rport";
+
+    std::string result;
+    result.reserve(rawMsg.size() + via.size() + 4);
+    result.append(rawMsg, 0, pos + 2);  // request-line + \r\n
+    result.append(via);
+    result.append("\r\n");
+    result.append(rawMsg, pos + 2);     // 나머지 헤더 + 바디
+    return result;
+}
+
+// 프록시 Via 헤더 제거 (RFC 3261 §16.7)
+// callee의 응답을 caller에게 전달할 때, 프록시가 추가한 최상단 Via를 제거한다.
+std::string SipCore::removeTopVia(const std::string& rawMsg) const
+{
+    // status-line 끝 위치
+    auto firstLineEnd = rawMsg.find("\r\n");
+    if (firstLineEnd == std::string::npos) return rawMsg;
+
+    // 첫 번째 Via 헤더 찾기
+    std::string afterFirstLine = rawMsg.substr(firstLineEnd + 2);
+    std::string lowerHeaders = afterFirstLine;
+    std::transform(lowerHeaders.begin(), lowerHeaders.end(), lowerHeaders.begin(), ::tolower);
+
+    auto viaPos = lowerHeaders.find("via:");
+    if (viaPos == std::string::npos) return rawMsg;
+
+    // Via 라인 끝 찾기
+    auto viaLineEnd = afterFirstLine.find("\r\n", viaPos);
+    if (viaLineEnd == std::string::npos) return rawMsg;
+
+    // 프록시가 추가한 Via인지 확인 (branch에 "proxy-" 포함)
+    std::string viaLine = afterFirstLine.substr(viaPos, viaLineEnd - viaPos);
+    if (viaLine.find("z9hG4bK-proxy-") == std::string::npos)
+    {
+        return rawMsg;  // 프록시가 추가한 Via가 아니면 제거하지 않음
+    }
+
+    // Via 라인 제거
+    std::string result;
+    result.reserve(rawMsg.size());
+    result.append(rawMsg, 0, firstLineEnd + 2);
+    if (viaPos > 0) result.append(afterFirstLine, 0, viaPos);
+    result.append(afterFirstLine, viaLineEnd + 2);
+    return result;
 }
 
 // Helper function to build SIP response for INVITE requests

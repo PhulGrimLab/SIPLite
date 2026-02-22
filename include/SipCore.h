@@ -688,7 +688,11 @@ private:
     
     std::string extractTagFromHeader(const std::string& header) const; 
     
-    std::string generateTag() const; 
+    std::string generateTag() const;
+
+    // 프록시 Via 헤더 관리 (RFC 3261 §16.6/§16.7)
+    std::string addProxyVia(const std::string& rawMsg) const;
+    std::string removeTopVia(const std::string& rawMsg) const;
 
     std::string buildInviteResponse(const SipMessage& req,
                                     int code,
@@ -744,4 +748,15 @@ private:
     // Sender callback (set by UdpServer)
     SenderFn sender_;
 
+    // 프록시 로컬 주소 정보 (Via 헤더 생성용)
+    std::string localAddr_ = "127.0.0.1";
+    uint16_t localPort_ = 5060;
+
+public:
+    // 프록시 로컬 주소 설정
+    void setLocalAddress(const std::string& ip, uint16_t port)
+    {
+        localAddr_ = ip;
+        localPort_ = port;
+    }
 };
