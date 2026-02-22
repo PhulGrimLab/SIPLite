@@ -474,6 +474,10 @@ public:
             ++it;
         }
 
+        // 보류 CANCEL 목록도 정리 — 대응하는 INVITE가 오지 않은 stale 항목 제거
+        // pendingCancels_는 pendingInvMutex_로 보호됨 (이미 잠금 상태)
+        pendingCancels_.clear();
+
         return removed;
     }
 
@@ -740,6 +744,11 @@ private:
 
     mutable std::mutex pendingInvMutex_;
     std::unordered_map<std::string, PendingInvite> pendingInvites_;
+
+    // CANCEL이 INVITE보다 먼저 처리될 때를 대비한 보류 CANCEL 저장소
+    // key = callId:cseqNum (pendingInvites_와 동일한 키 형식)
+    // pendingInvMutex_로 보호됨 (pendingInvites_와 동일한 뮤텍스)
+    std::unordered_set<std::string> pendingCancels_;
 
     // Dialog storage
     mutable std::mutex dlgMutex_;

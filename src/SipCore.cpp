@@ -498,6 +498,11 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     // 프록시 Via가 추가된 INVITE를 먼저 생성 — CANCEL/ACK 생성 시에도 동일한 Via가 필요
     std::string fwdInvite = addProxyVia(pkt.data);
 
+    // 보류 CANCEL 처리용 변수 (락 밖에서 네트워크 전송을 위해)
+    bool deferredCancel = false;
+    std::string cancelForCallee;
+    std::string resp487ForCaller;
+
     // ===== ActiveCall + PendingInvite를 하나의 락 구간에서 원자적으로 생성 =====
     // 이 두 자료구조 생성 사이에 gap이 있으면 CANCEL/거절 응답이 도착했을 때
     // pendingInvites_에 키가 없어서 무시되는 경합 조건이 발생할 수 있다.
@@ -538,6 +543,55 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         pi.lastResponse = buildSimpleResponse(msg, 100, "Trying");
 
         pendingInvites_[key] = std::move(pi);
+
+        // ===== 보류 CANCEL 확인 =====
+        // CANCEL이 이 INVITE보다 먼저 다른 워커 스레드에서 처리되어
+        // pendingCancels_에 등록되어 있을 수 있다. 발견되면 즉시 취소 처리.
+        auto cancelIt = pendingCancels_.find(key);
+        if (cancelIt != pendingCancels_.end())
+        {
+            pendingCancels_.erase(cancelIt);
+            deferredCancel = true;
+            Logger::instance().info("[handleInvite] Deferred CANCEL found, cancelling immediately: key=" + key);
+
+            auto& piRef = pendingInvites_[key];
+
+            // callee에게 전달할 CANCEL 생성
+            cancelForCallee = buildCancelForPending(piRef);
+
+            // caller에게 보낼 487 Request Terminated 생성
+            SipMessage pendingReq;
+            if (parseSipMessage(piRef.origRequest, pendingReq))
+            {
+                resp487ForCaller = buildSimpleResponse(pendingReq, 487, "Request Terminated");
+            }
+
+            // 자료구조 정리
+            pendingInvites_.erase(key);
+            activeCalls_.erase(callId);
+            dialogs_.erase(callId);
+        }
+    } // 락 해제
+
+    // 보류 CANCEL이 있었으면 락 밖에서 네트워크 전송
+    if (deferredCancel)
+    {
+        if (sender_)
+        {
+            // INVITE를 callee에게 보낸 후 즉시 CANCEL 전송
+            sender_(regCopy.ip, regCopy.port, fwdInvite);
+            if (!cancelForCallee.empty())
+            {
+                sender_(regCopy.ip, regCopy.port, cancelForCallee);
+            }
+            if (!resp487ForCaller.empty())
+            {
+                sender_(pkt.remoteIp, pkt.remotePort, resp487ForCaller);
+            }
+        }
+
+        outResponse.clear();
+        return true;
     }
 
     if (sender_)
@@ -805,12 +859,15 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
         }
         else
         {
-            // No pending invite found — just clean up unconfirmed call
+            // PendingInvite가 아직 없음 — INVITE보다 CANCEL이 먼저 처리된 경합 상황
+            // 보류 CANCEL 목록에 등록하여, INVITE가 PendingInvite를 생성할 때 즉시 취소 처리하도록 함
+            pendingCancels_.insert(key);
+            Logger::instance().info("[handleCancel] PendingInvite not yet created, deferring cancel: key=" + key);
+
+            // 미확립 ActiveCall이 이미 존재하면 정리
             auto acIt = activeCalls_.find(callId);
             if (acIt != activeCalls_.end() && !acIt->second.confirmed)
             {
-                // SIP CANCEL 요청이 처리된 경우에는 해당 통화가 아직 확립되지 않은 상태인 경우에만
-                // ActiveCall에서 해당 통화를 삭제하여 SIP 흐름 관리에 반영한다.
                 activeCalls_.erase(acIt);
             }
         }
