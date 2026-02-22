@@ -221,9 +221,12 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
                     ackData = std::move(ack);
                 }
 
-                // 에러 응답 시 ActiveCall 및 Dialog 정리
+                // 에러 응답 시 ActiveCall, Dialog, PendingInvite 정리
+                // 3xx-6xx 거절 시 pendingInvites_를 즉시 제거하여,
+                // 동일 callId:cseqNum 키의 새로운 INVITE가 재전송으로 오탐되지 않도록 한다.
                 activeCalls_.erase(callId);
                 dialogs_.erase(callId);
+                pendingInvites_.erase(it);
             }
         }
     } // all locks released
@@ -478,15 +481,25 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         auto it = pendingInvites_.find(key);
         if (it != pendingInvites_.end())
         {
-            if (!it->second.lastResponse.empty())
+            // COMPLETED 상태(이미 거절/종료된 트랜잭션)는 재전송이 아닌 새 요청으로 처리
+            // 이전 트랜잭션이 아직 정리되지 않은 경우에도 새로운 통화를 정상 처리할 수 있도록 한다.
+            if (it->second.state == TxState::COMPLETED)
             {
-                retransmitData = it->second.lastResponse;
+                pendingInvites_.erase(it);
+                // isRetransmit = false 유지 → 새 INVITE로 진행
             }
             else
             {
-                retransmitData = buildSimpleResponse(msg, 100, "Trying");
+                if (!it->second.lastResponse.empty())
+                {
+                    retransmitData = it->second.lastResponse;
+                }
+                else
+                {
+                    retransmitData = buildSimpleResponse(msg, 100, "Trying");
+                }
+                isRetransmit = true;
             }
-            isRetransmit = true;
         }
     }
 
