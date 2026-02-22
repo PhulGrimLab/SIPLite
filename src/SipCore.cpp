@@ -495,8 +495,16 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     std::string fromTag = extractTagFromHeader(fromHdr);
     std::string toTag = generateTag();
 
+    // 프록시 Via가 추가된 INVITE를 먼저 생성 — CANCEL/ACK 생성 시에도 동일한 Via가 필요
+    std::string fwdInvite = addProxyVia(pkt.data);
+
+    // ===== ActiveCall + PendingInvite를 하나의 락 구간에서 원자적으로 생성 =====
+    // 이 두 자료구조 생성 사이에 gap이 있으면 CANCEL/거절 응답이 도착했을 때
+    // pendingInvites_에 키가 없어서 무시되는 경합 조건이 발생할 수 있다.
     {
-        std::lock_guard<std::mutex> lock(callMutex_);
+        std::lock_guard<std::mutex> lockCall(callMutex_);
+        std::lock_guard<std::mutex> lockPend(pendingInvMutex_);
+
         auto existingIt = activeCalls_.find(callId);
         if (existingIt == activeCalls_.end() && activeCalls_.size() >= SipConstants::MAX_ACTIVE_CALLS)
         {
@@ -517,13 +525,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         call.startTime = std::chrono::steady_clock::now();
         call.confirmed = false;
         activeCalls_[callId] = call;
-    }
 
-    // 프록시 Via가 추가된 INVITE를 먼저 생성 — CANCEL/ACK 생성 시에도 동일한 Via가 필요
-    std::string fwdInvite = addProxyVia(pkt.data);
-
-    {
-        std::lock_guard<std::mutex> lock(pendingInvMutex_);
         PendingInvite pi;
         pi.callerIp = pkt.remoteIp;
         pi.callerPort = pkt.remotePort;
