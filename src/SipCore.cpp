@@ -429,51 +429,11 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         return true;
     }
 
-    // SIP 흐름 관리에 필요한 처리를 수행한 후, sender_ 콜백을 통해 네트워크로 메시지를 전송할 수 있도록 한다.
-    if (sender_)
-    {
-        sender_(pkt.remoteIp, pkt.remotePort, buildSimpleResponse(msg, 100, "Trying"));
-    }
-    else
-    {
-        // sender_ 콜백이 등록되지 않은 경우에도 SIP 흐름 관리에 필요한 처리를 수행할 수 있도록,
-        // 100 Trying 응답을 outResponse에 생성하여 반환한다.
-        outResponse = buildSimpleResponse(msg, 100, "Trying");
-    }
-
-    // toTag는 로컬 변수 사용 — activeCalls_ 접근 시 callMutex_ 필요 (data race 방지)
-    std::string fromTag = extractTagFromHeader(fromHdr);
-    std::string toTag = generateTag();
-
-    {
-        std::lock_guard<std::mutex> lock(callMutex_);
-        auto existingIt = activeCalls_.find(callId);
-        if (existingIt == activeCalls_.end() && activeCalls_.size() >= SipConstants::MAX_ACTIVE_CALLS)
-        {
-            outResponse = buildSimpleResponse(msg, 503, "Service Unavailable");
-            return true;
-        }
-
-        ActiveCall call;
-        call.callId = callId;
-        call.fromUri = extractUriFromHeader(fromHdr);
-        call.toUri = toUri;
-        call.fromTag = fromTag;
-        call.toTag = toTag;
-        call.callerIp = pkt.remoteIp;
-        call.callerPort = pkt.remotePort;
-        call.calleeIp = regCopy.ip;
-        call.calleePort = regCopy.port;
-        call.startTime = std::chrono::steady_clock::now();
-        call.confirmed = false;
-        activeCalls_[callId] = call;    // ActiveCall을 생성하여 activeCalls_ 맵에 저장한다.
-    }
-
     std::string key = callId + ":" + std::to_string(cseqNum);
 
-    // Check for retransmission (duplicate INVITE)
-    // SIP INVITE 요청이 재전송된 경우, 기존 트랜잭션이 pendingInvites_에 존재하는지 확인하여,
-    // 존재하는 경우에는 기존 트랜잭션의 마지막 응답 메시지를 재전송하도록 한다.
+    // ===== 재전송 체크를 ActiveCall 생성보다 먼저 수행 =====
+    // 재전송인 경우 ActiveCall을 덮어쓰지 않고 즉시 반환하여,
+    // 기존 트랜잭션 상태가 보존되도록 한다.
     std::string retransmitData;
     bool isRetransmit = false;
     {
@@ -503,6 +463,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         }
     }
 
+    // 재전송인 경우 ActiveCall 생성/덮어쓰기 없이 즉시 반환
     if (isRetransmit)
     {
         if (sender_ && !retransmitData.empty())
@@ -510,6 +471,46 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
             sender_(pkt.remoteIp, pkt.remotePort, retransmitData);
         }
         return true;
+    }
+
+    // ===== 재전송이 아닌 새로운 INVITE만 여기 도달 =====
+
+    // 100 Trying은 새로운 INVITE에 대해서만 전송
+    if (sender_)
+    {
+        sender_(pkt.remoteIp, pkt.remotePort, buildSimpleResponse(msg, 100, "Trying"));
+    }
+    else
+    {
+        outResponse = buildSimpleResponse(msg, 100, "Trying");
+    }
+
+    // toTag는 로컬 변수 사용 — activeCalls_ 접근 시 callMutex_ 필요 (data race 방지)
+    std::string fromTag = extractTagFromHeader(fromHdr);
+    std::string toTag = generateTag();
+
+    {
+        std::lock_guard<std::mutex> lock(callMutex_);
+        auto existingIt = activeCalls_.find(callId);
+        if (existingIt == activeCalls_.end() && activeCalls_.size() >= SipConstants::MAX_ACTIVE_CALLS)
+        {
+            outResponse = buildSimpleResponse(msg, 503, "Service Unavailable");
+            return true;
+        }
+
+        ActiveCall call;
+        call.callId = callId;
+        call.fromUri = extractUriFromHeader(fromHdr);
+        call.toUri = toUri;
+        call.fromTag = fromTag;
+        call.toTag = toTag;
+        call.callerIp = pkt.remoteIp;
+        call.callerPort = pkt.remotePort;
+        call.calleeIp = regCopy.ip;
+        call.calleePort = regCopy.port;
+        call.startTime = std::chrono::steady_clock::now();
+        call.confirmed = false;
+        activeCalls_[callId] = call;
     }
 
     {
@@ -524,7 +525,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         pi.state = TxState::TRYING;
         pi.lastResponse = buildSimpleResponse(msg, 100, "Trying");
 
-        pendingInvites_[key] = std::move(pi);   // PendingInvite를 생성하여 pendingInvites_ 맵에 저장한다.
+        pendingInvites_[key] = std::move(pi);
     }
 
     if (sender_)
