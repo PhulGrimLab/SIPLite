@@ -4,8 +4,8 @@
 #include <mutex>
 #include <condition_variable>
 
-template <typename T>
-class ConcurrentQueue 
+template<typename T>
+class ConcurrentQueue
 {
 private:
     // 메모리를 따로 할당하지 않고 std::queue를 멤버로 사용

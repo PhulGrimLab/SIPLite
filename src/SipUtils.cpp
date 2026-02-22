@@ -67,6 +67,41 @@ std::string getHeader(const SipMessage& msg, const std::string& name)
     return it->second;
 }
 
+// SIP 메시지에서 특정 이름의 모든 헤더 값 가져오기 (예: Via 다중 헤더)
+// 헤더가 콤마로 결합되어 있으므로 (RFC 3261 Section 7.3.1) 분리하여 반환
+std::vector<std::string> getAllHeaders(const SipMessage& msg, const std::string& name)
+{
+    std::vector<std::string> results;
+    std::string key = toLower(name);
+    auto it = msg.headers.find(key);
+    if (it == msg.headers.end())
+        return results;
+
+    // 콤마로 결합된 헤더 값을 개별 값으로 분리
+    const std::string& combined = it->second;
+    std::size_t start = 0;
+    while (start < combined.size())
+    {
+        std::size_t comma = combined.find(',', start);
+        std::string val;
+        if (comma == std::string::npos)
+        {
+            val = trim(combined.substr(start));
+            start = combined.size();
+        }
+        else
+        {
+            val = trim(combined.substr(start, comma - start));
+            start = comma + 1;
+        }
+        if (!val.empty())
+        {
+            results.push_back(std::move(val));
+        }
+    }
+    return results;
+}
+
 // SIP 메시지의 헤더 값에서 CR, LF, NULL 문자를 제거하여 정화된 문자열 반환
 // SIP 메시지의 헤더 값은 로그에 출력할 때 문제가 될 수 있는 제어 문자를 포함할 수 있습니다.
 // 이 함수는 헤더 값에서 CR, LF, NULL 문자를 제거하여 로그에 출력할 때 안전한 문자열로 변환하는 역할을 합니다.
@@ -79,7 +114,7 @@ std::string sanitizeHeaderValue(const std::string& value)
 
     for (char c : value)
     {
-        if (c != '\r' && c != '\n' && c != '\0')
+        if (c != '\r' && c != '\n' && c != '\0' && c != '\t')
         {
             result += c;
         }
@@ -195,6 +230,102 @@ bool isValidRequestUri(const std::string& uri)
     }
 
     return true;
+}
+
+// CSeq 헤더에서 번호 추출 (오버플로우 시 -1 반환)
+int parseCSeqNum(const std::string& cseq)
+{
+    long long num = 0;
+    size_t i = 0;
+    bool found = false;
+    while (i < cseq.size() && std::isspace(static_cast<unsigned char>(cseq[i]))) ++i;
+    while (i < cseq.size() && std::isdigit(static_cast<unsigned char>(cseq[i])))
+    {
+        num = num * 10 + (cseq[i] - '0');
+        if (num > static_cast<long long>(std::numeric_limits<int>::max()))
+        {
+            return -1; // overflow
+        }
+        found = true;
+        ++i;
+    }
+    if (!found) return -1;
+    return static_cast<int>(num);
+}
+
+// CSeq 헤더에서 메서드 추출 (선행 공백 처리 포함)
+std::string parseCSeqMethod(const std::string& cseq)
+{
+    size_t pos = 0;
+    // 선행 공백 건너뛰기
+    while (pos < cseq.size() && std::isspace(static_cast<unsigned char>(cseq[pos]))) ++pos;
+    // 숫자 건너뛰기
+    while (pos < cseq.size() && std::isdigit(static_cast<unsigned char>(cseq[pos]))) ++pos;
+    // 숫자와 메서드 사이 공백 건너뛰기
+    while (pos < cseq.size() && std::isspace(static_cast<unsigned char>(cseq[pos]))) ++pos;
+    return cseq.substr(pos);
+}
+
+// 로그/출력용 문자열 정화
+std::string sanitizeForDisplay(const std::string& input,
+                                std::size_t maxLen,
+                                char replacement,
+                                bool allowCrLfTab)
+{
+    const std::string suffix = "... (truncated)";
+    const std::size_t suffixLen = suffix.size();
+
+    std::string result;
+
+    std::size_t contentMax = maxLen;
+    if (input.size() > maxLen)
+    {
+        result.reserve(maxLen);
+        if (maxLen > suffixLen)
+        {
+            contentMax = maxLen - suffixLen;
+        }
+        else
+        {
+            contentMax = 0;
+        }
+    }
+    else
+    {
+        result.reserve(input.size());
+        contentMax = input.size();
+    }
+
+    for (std::size_t i = 0; i < input.size() && result.size() < contentMax; ++i)
+    {
+        unsigned char uc = static_cast<unsigned char>(input[i]);
+        if (uc >= 32 && uc < 127)
+        {
+            result += static_cast<char>(uc);
+        }
+        else if (allowCrLfTab && (uc == '\r' || uc == '\n' || uc == '\t'))
+        {
+            result += static_cast<char>(uc);
+        }
+        else
+        {
+            result += replacement;
+        }
+    }
+
+    if (input.size() > maxLen)
+    {
+        if (maxLen > suffixLen)
+        {
+            result += suffix;
+        }
+        else if (maxLen > 0)
+        {
+            result = suffix.substr(0, maxLen);
+        }
+    }
+
+    return result;
 }
 
 // To 헤더에 tag 없으면 tag=server 추가

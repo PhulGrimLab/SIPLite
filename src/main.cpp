@@ -48,81 +48,6 @@ namespace
             g_terminate.store(true, std::memory_order_release);
         }
     }
-    
-    // 설정 파일 경로 검증 (보안 강화 버전)
-    bool validateConfigPath(const std::string& path)
-    {
-        // 빈 경로 체크
-        if (path.empty() || path.size() > 256)
-        {
-            std::cerr << "[오류] 잘못된 경로 길이\n";
-            return false;
-        }
-
-        // 널 바이트 체크
-        if (path.find('\0') != std::string::npos)
-        {
-            std::cerr << "[오류] 경로에 널 바이트 포함\n";
-            return false;
-        }
-
-        // 다양한 경로 순회 패턴 체크
-        std::string lowerPath = path;
-        std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-
-        const char* dangerousPatterns[] = {
-            "..", "..\\" , "../",
-            "%2e%2e", "%2e%2e%2f", "%2e%2e%5c",
-            "%252e",  // 이중 인코딩
-            "....//", "....\\\\" ,
-            "/etc/", "/proc/", "/sys/", "/dev/",
-            "c:\\windows", "\\\\"
-        };
-
-        for (const auto& pattern : dangerousPatterns)
-        {
-            if (lowerPath.find(pattern) != std::string::npos)
-            {
-                std::cerr << "[오류] 보안: 허용되지 않은 경로 패턴\n";
-                return false;
-            }
-        }
-
-        try
-        {
-            std::filesystem::path p(path);
-
-            // 확장자 검증
-            std::string ext = p.extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(),
-                          [](unsigned char c) { return std::tolower(c); });
-
-            if (ext != ".xml")
-            {
-                std::cerr << "[오류] XML 파일만 허용됩니다\n";
-                return false;
-            }
-
-            // 심볼릭 링크 체크
-            std::error_code ec;
-            if (std::filesystem::exists(path, ec) && !ec)
-            {
-                if (std::filesystem::is_symlink(path, ec))
-                {
-                    std::cerr << "[오류] 보안: 심볼릭 링크 비허용\n";
-                    return false;
-                }
-            }
-        }
-        catch (const std::exception& e)
-        {
-            std::cerr << "[오류] 경로 검증 실패\n";
-            return false;
-        }
-        
-        return true;
-    }
 }
 
 
@@ -138,7 +63,7 @@ int main(int argc, char* argv[])
     {
         configPath = argv[1];
         
-        if (!validateConfigPath(configPath))
+        if (!XmlConfigLoader::validateFilePath(configPath))
         {
             std::cerr << "[오류] 잘못된 설정 파일 경로\n";
             return 1;

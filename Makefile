@@ -23,6 +23,14 @@ TEST_TARGET = $(BUILD_DIR)/test_parser
 # Additional test targets
 TEST_UTIL_TARGET = $(BUILD_DIR)/test_utils
 
+# Extended test targets
+TEST_PARSER_EXT_TARGET = $(BUILD_DIR)/test_parser_extended
+TEST_UTILS_EXT_TARGET = $(BUILD_DIR)/test_utils_extended
+TEST_SIPCORE_EXT_TARGET = $(BUILD_DIR)/test_sipcore_extended
+TEST_TRANSACTION_TARGET = $(BUILD_DIR)/test_transaction
+TEST_XMLCONFIG_TARGET = $(BUILD_DIR)/test_xmlconfig
+TEST_CONCURRENT_QUEUE_TARGET = $(BUILD_DIR)/test_concurrent_queue
+TEST_LOGGER_TARGET = $(BUILD_DIR)/test_logger
 
 # 기본 타겟
 all: $(BUILD_DIR) $(TARGET)
@@ -49,6 +57,34 @@ TEST_SIPCORE_TARGET = $(BUILD_DIR)/test_sipcore
 TEST_SIPCORE_OBJ = $(BUILD_DIR)/test_test_sipcore.o
 
 $(TEST_SIPCORE_TARGET): $(TEST_SIPCORE_OBJ) $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# Extended parser test binary
+$(TEST_PARSER_EXT_TARGET): $(BUILD_DIR)/test_test_parser_extended.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# Extended utils test binary
+$(TEST_UTILS_EXT_TARGET): $(BUILD_DIR)/test_test_utils_extended.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# Extended sipcore test binary
+$(TEST_SIPCORE_EXT_TARGET): $(BUILD_DIR)/test_test_sipcore_extended.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# Transaction/Dialog test binary
+$(TEST_TRANSACTION_TARGET): $(BUILD_DIR)/test_test_transaction.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# XmlConfigLoader test binary
+$(TEST_XMLCONFIG_TARGET): $(BUILD_DIR)/test_test_xmlconfig.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# ConcurrentQueue test binary
+$(TEST_CONCURRENT_QUEUE_TARGET): $(BUILD_DIR)/test_test_concurrent_queue.o $(LIB_OBJS)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
+
+# Logger test binary
+$(TEST_LOGGER_TARGET): $(BUILD_DIR)/test_test_logger.o $(LIB_OBJS)
 	$(CXX) -o $@ $^ $(LDFLAGS) $(CXXFLAGS)
 
 # 오브젝트 파일 컴파일
@@ -83,4 +119,42 @@ run: all
 test: $(TEST_TARGET)
 	$(TEST_TARGET)
 
-.PHONY: all clean rebuild debug release run test
+# Run utils tests
+test_utils: $(TEST_UTIL_TARGET)
+	$(TEST_UTIL_TARGET)
+# Run sipcore tests
+test_sipcore: $(TEST_SIPCORE_TARGET)
+	$(TEST_SIPCORE_TARGET)
+
+# Run extended parser tests
+test_parser_ext: $(TEST_PARSER_EXT_TARGET)
+	$(TEST_PARSER_EXT_TARGET)
+
+# Run extended utils tests
+test_utils_ext: $(TEST_UTILS_EXT_TARGET)
+	$(TEST_UTILS_EXT_TARGET)
+
+# Run extended sipcore tests
+test_sipcore_ext: $(TEST_SIPCORE_EXT_TARGET)
+	$(TEST_SIPCORE_EXT_TARGET)
+
+# Run transaction/dialog tests
+test_transaction: $(TEST_TRANSACTION_TARGET)
+	$(TEST_TRANSACTION_TARGET)
+
+# Run xmlconfig tests
+test_xmlconfig: $(TEST_XMLCONFIG_TARGET)
+	$(TEST_XMLCONFIG_TARGET)
+
+# Run concurrent queue tests
+test_concurrent_queue: $(TEST_CONCURRENT_QUEUE_TARGET)
+	$(TEST_CONCURRENT_QUEUE_TARGET)
+
+# Run logger tests
+test_logger: $(TEST_LOGGER_TARGET)
+	$(TEST_LOGGER_TARGET)
+
+# Run ALL tests (basic + extended)
+test_all: test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger
+
+.PHONY: all clean rebuild debug release run test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger test_all

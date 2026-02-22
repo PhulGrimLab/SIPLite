@@ -113,7 +113,7 @@ struct Registration {
 #include <unordered_map>
 #include <chrono>
 
-class SipCore 
+class SipCore
 {
 public:
     using SenderFn = std::function<bool(const std::string&, uint16_t, const std::string&)>;
@@ -128,21 +128,6 @@ public:
 
     // 응답 메시지 처리 (forwarded INVITE의 응답을 원래 호출자에게 전달)
     bool handleResponse(const UdpPacket& pkt, const SipMessage& msg);
-
-    // Registration 조회
-    // WARNING: 반환된 포인터는 락 해제 후 무효화될 수 있음
-    // 가능하면 findRegistrationSafe() 사용 권장
-    [[deprecated("Use findRegistrationSafe() instead for thread safety")]]
-    const Registration* findRegistration(const std::string& aor) const
-    {
-        std::lock_guard<std::mutex> lock(regMutex_);
-        auto it = regs_.find(aor);
-        if (it != regs_.end())
-        {
-            return &it->second;
-        }
-        return nullptr;
-    }
 
     // 활성 통화 정보
     struct ActiveCall
@@ -177,20 +162,6 @@ public:
         bool confirmed = false;  // true after ACK
         std::chrono::steady_clock::time_point created;
     };
-
-    // WARNING: 반환된 포인터는 락 해제 후 무효화될 수 있음
-    // 가능하면 findCallSafe() 사용 권장
-    [[deprecated("Use findCallSafe() instead for thread safety")]]
-    const ActiveCall* findCall(const std::string& callId) const
-    {
-        std::lock_guard<std::mutex> lock(callMutex_);
-        auto it = activeCalls_.find(callId);
-        if (it != activeCalls_.end())
-        {
-            return &it->second;
-        }
-        return nullptr;
-    }
 
     // ================================
     // 안전한 조회 함수 (복사본 반환)
@@ -249,7 +220,11 @@ public:
     
     std::size_t cleanupStaleCalls(std::chrono::seconds maxAge = std::chrono::seconds(300))
     {
-        std::lock_guard<std::mutex> lock(callMutex_);
+        // 올바른 뮤텍스 순서: callMutex_ → pendingInvMutex_ → dlgMutex_ (#7 fix)
+        std::lock_guard<std::mutex> lockCall(callMutex_);
+        std::lock_guard<std::mutex> lockPend(pendingInvMutex_);
+        std::lock_guard<std::mutex> lockDlg(dlgMutex_);
+
         auto now = std::chrono::steady_clock::now();
         std::size_t removed = 0;
         
@@ -262,6 +237,20 @@ public:
                     now - it->second.startTime);
                 if (elapsed > maxAge)
                 {
+                    std::string callId = it->first;
+
+                    // Dialog 정리
+                    dialogs_.erase(callId);
+
+                    // PendingInvite 정리
+                    for (auto pit = pendingInvites_.begin(); pit != pendingInvites_.end(); )
+                    {
+                        if (pit->first.rfind(callId + ":", 0) == 0)
+                            pit = pendingInvites_.erase(pit);
+                        else
+                            ++pit;
+                    }
+
                     it = activeCalls_.erase(it);
                     ++removed;
                     continue;
@@ -280,29 +269,49 @@ public:
     // non-COMPLETED transactions older than `ttl`.
     std::size_t cleanupStaleTransactions(std::chrono::seconds ttl = std::chrono::seconds(32))
     {
-        std::lock_guard<std::mutex> lock(pendingInvMutex_);
+        // 올바른 뮤텍스 순서: callMutex_ → pendingInvMutex_ → dlgMutex_ (#4 fix)
+        std::lock_guard<std::mutex> lockCall(callMutex_);
+        std::lock_guard<std::mutex> lockPend(pendingInvMutex_);
+        std::lock_guard<std::mutex> lockDlg(dlgMutex_);
+
         auto now = std::chrono::steady_clock::now();
         std::size_t removed = 0;
 
         for (auto it = pendingInvites_.begin(); it != pendingInvites_.end(); )
         {
+            bool shouldRemove = false;
+
             if (it->second.state == TxState::COMPLETED)
             {
                 if (it->second.expiry <= now)
-                {
-                    it = pendingInvites_.erase(it);
-                    ++removed;
-                    continue;
-                }
+                    shouldRemove = true;
             }
             else
             {
                 if (now - it->second.ts > ttl)
+                    shouldRemove = true;
+            }
+
+            if (shouldRemove)
+            {
+                // key에서 callId 추출 ("callId:cseqNum" 형식)
+                std::string key = it->first;
+                auto colonPos = key.find(':');
+                if (colonPos != std::string::npos)
                 {
-                    it = pendingInvites_.erase(it);
-                    ++removed;
-                    continue;
+                    std::string callId = key.substr(0, colonPos);
+                    // 미확립 ActiveCall 및 Dialog도 함께 정리
+                    auto acIt = activeCalls_.find(callId);
+                    if (acIt != activeCalls_.end() && !acIt->second.confirmed)
+                    {
+                        activeCalls_.erase(acIt);
+                    }
+                    dialogs_.erase(callId);
                 }
+
+                it = pendingInvites_.erase(it);
+                ++removed;
+                continue;
             }
             ++it;
         }
@@ -557,6 +566,8 @@ private:
     {
         std::string callerIp;
         uint16_t callerPort = 0;
+        std::string calleeIp;          // 수신자 IP (INVITE 전달 대상)
+        uint16_t calleePort = 0;       // 수신자 Port
         std::string origRequest;       // raw request forwarded
         std::string lastResponse;      // last raw response forwarded back to caller
         TxState state = TxState::TRYING;

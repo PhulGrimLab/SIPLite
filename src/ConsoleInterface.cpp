@@ -1,4 +1,5 @@
 #include "ConsoleInterface.h"
+#include "SipUtils.h"
 
 #include <sstream>
 #include <algorithm>
@@ -161,7 +162,7 @@ void ConsoleInterface::consoleLoop()
         }
         inputCv_.notify_one();   // 입력 스레드 깨우기
 
-        input = trim(input);    // 앞뒤 공백 제거
+        input = ::trim(input);    // 앞뒤 공백 제거
         if (!input.empty())
         {
             processCommand(input);
@@ -225,42 +226,6 @@ bool ConsoleInterface::validateConsoleInput(const std::string& input)
     return true;
 }
 
-// 로그 인젝션 방지용 출력 정화
-// 제어문자 및 비ASCII 문자를 '?'로 대체하고 최대 길이 제한
-// 초과 시 "..." 추가
-// 기본 최대 길이 50
-// 예: "Hello, World!\n" -> "Hello, World!?"
-// "This is a very long message that exceeds the maximum length." -> "This is a very long message that exceeds the ma..."
-// "Non-ASCII: ñ, ü, 漢字" -> "Non-ASCII: ?, ?, ??"
-std::string ConsoleInterface::sanitizeOutput(const std::string& input, std::size_t maxLen)
-{
-    std::string result;
-    // 미리 용량 할당
-    result.reserve(std::min(input.size(), maxLen));
-
-    for (char c : input)
-    {
-        // 최대 길이 초과 시 "..." 추가 후 종료
-        if (result.size() >= maxLen)
-        {
-            result += "...";
-            break;
-        }
-
-        // ASCII 인쇄 가능한 문자만 허용
-        if (c >= 32 && c < 127)
-        {
-            result += c;
-        }
-        else
-        {
-            result += '?';
-        }
-    }
-
-    return result;
-}
-
 void ConsoleInterface::processCommand(const std::string& cmd)
 {
     if (!validateConsoleInput(cmd))
@@ -269,7 +234,7 @@ void ConsoleInterface::processCommand(const std::string& cmd)
         return;
     }
 
-    std::cout << "\n입력값 = " << sanitizeOutput(cmd) << "\n";
+    std::cout << "\n입력값 = " << sanitizeForDisplay(cmd, 50, '?', false) << "\n";
 
     if (cmd == "1" || cmd == "status")
     {
@@ -421,8 +386,8 @@ void ConsoleInterface::showActiveCalls()
 
             oss << "│  " << std::setw(5) << std::left << idx
                 << "  " << std::setw(22) << std::left << truncate(call.callId, 20)
-                << "  " << std::setw(13) << std::left << truncate(extractUser(call.fromUri), 11)
-                << "  " << std::setw(13) << std::left << truncate(extractUser(call.toUri), 11)
+                << "  " << std::setw(13) << std::left << truncate(extractUserFromUri(call.fromUri), 11)
+                << "  " << std::setw(13) << std::left << truncate(extractUserFromUri(call.toUri), 11)
                 << "  " << std::setw(12) << std::left << status
                 << "│\n";
             ++idx;
@@ -473,27 +438,6 @@ void ConsoleInterface::handleExit()
 }
 
 /*
-[문자열 앞뒤 공백 제거 함수 설명]
-공백 문자( , \t, \r, \n)를 기준으로 문자열의 **앞(leading)**과 뒤(trailing) 공백을 제거합니다.
-find_first_not_of로 첫 번째 비공백 위치를, 
-find_last_not_of로 마지막 비공백 위치를 찾아 그 사이 부분문자열을 반환합니다.
-전체가 공백이면 빈 문자열 ""을 반환합니다.
-[consoleLoop[](src/ConsoleInterface.cpp)에서 사용자 입력을 정리할 때 호출됩니다: ]
-(http://_vscodecontentref_/4)input = trim(input);
-*/
-std::string ConsoleInterface::trim(std::string_view s)
-{
-    constexpr std::string_view ws = " \t\r\n";
-    const auto start = s.find_first_not_of(ws);
-    if (start == std::string_view::npos)
-    {
-        return "";
-    }
-    const auto end = s.find_last_not_of(ws);
-    return std::string(s.substr(start, end - start + 1));
-}
-
-/*
 [문자열 자르기 함수 설명]
 문자열이 maxLen보다 길면 잘라내고 ..을 붙여 최대 길이 내로 맞춥니다.
 maxLen < 3이면 .. 접미사 없이 단순 잘라냄 (접미사 넣을 공간이 부족하므로).
@@ -516,28 +460,6 @@ std::string ConsoleInterface::truncate(std::string_view s, std::size_t maxLen)
 }
 
 /*
-[SIP URI 사용자 추출 함수 설명]
-SIP URI 형식 sip:사용자@도메인에서 사용자 부분만 추출합니다.
-:와 @의 위치를 찾아 그 사이 문자열을 반환합니다.
-패턴이 맞지 않으면 원본 URI를 그대로 반환합니다.
-예: extractUser("sip:1001@192.168.1.100") → "1001"
-showActiveCalls에서 발신자/수신자 표시에 사용됩니다.
-*/
-std::string ConsoleInterface::extractUser(std::string_view uri)
-{
-    const auto colonPos = uri.find(':');
-    const auto atPos = uri.find('@');
-
-    if (colonPos != std::string_view::npos &&
-        atPos != std::string_view::npos &&
-        colonPos < atPos)
-    {
-        return std::string(uri.substr(colonPos + 1, atPos - colonPos - 1));
-    }
-    return std::string(uri);
-}
-
-/*
 [남은 시간 포맷 함수 설명]
 남은 시간을 초 단위로 받아 사람이 읽을 수 있는 형식으로 변환합니다.
 0~59초는 "X초", 60~3599초는 "Y분", 3600초 이상은 "Z시간"으로 표시합니다.
@@ -555,7 +477,7 @@ std::string ConsoleInterface::formatRemainingTime(long remaining)
         return "만료됨";
     }
 
-    std::array<char, 16> buf{};
+    std::array<char, 32> buf{};
     if (remaining < 60)
     {
         std::snprintf(buf.data(), buf.size(), "%ld초", remaining);
@@ -581,7 +503,7 @@ showActiveCalls에서 통화 상태에 "통화중 X분 Y초" 형식으로 표시
 */
 std::string ConsoleInterface::formatDuration(long seconds)
 {
-    std::array<char, 24> buf{};
+    std::array<char, 32> buf{};
     if (seconds < 60)
     {
         std::snprintf(buf.data(), buf.size(), "%ld초", seconds);

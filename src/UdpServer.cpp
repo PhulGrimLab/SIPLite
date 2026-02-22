@@ -1,4 +1,5 @@
 #include "UdpServer.h"
+#include "SipUtils.h"
 #include "Logger.h"
 
 #include <arpa/inet.h>
@@ -27,11 +28,11 @@ namespace
     3. 타입 안전한 매크로 대체 (#define 대신 사용)
     */
 
-    constexpr std::size_t RECV_BUFFER_SIZE = 2048; // UDP 수신 버퍼 크기
+    constexpr std::size_t RECV_BUFFER_SIZE = 65536; // UDP 수신 버퍼 크기 (최대 SIP 메시지 크기)
     constexpr std::size_t MAX_LOG_DATA_LENGTH = 200; // 로그 출력 최대 길이
 
     // 스레드 안전한 로그 에러 로깅 (perror 대체)
-    void logError(const char* prefix) 
+    void logError(const char* prefix)
     {
         int savedErrno = errno; // errno 값을 저장
         char buf[256];
@@ -49,79 +50,6 @@ namespace
         #endif
 
         Logger::instance().error(s);
-    }
-
-    // 로그 출력용 문자열 정화 (로그 인젝션 방지)
-    std::string sanitizeLogData(const std::string& data, std::size_t maxLen = MAX_LOG_DATA_LENGTH) 
-    {
-        const std::string suffix = "... (truncated)";
-        const std::size_t suffixLen = suffix.size();
-
-        std::string result;
-
-        // Reserve capacity: if truncation will happen, reserve full maxLen (including suffix)
-        if (data.size() > maxLen) 
-        {
-            result.reserve(maxLen);
-        } 
-        else 
-        {
-            result.reserve(data.size());
-        }
-
-        // Determine how many bytes from the original data we can include so that
-        // result + suffix (if any) does not exceed maxLen
-        std::size_t contentMax = maxLen;
-        if (data.size() > maxLen) 
-        {
-            if (maxLen > suffixLen) 
-            {
-                contentMax = maxLen - suffixLen;
-            } 
-            else 
-            {
-                // Not enough room for suffix; we'll return a leading part of the suffix instead
-                contentMax = 0;
-            }
-        } 
-        else 
-        {
-            contentMax = data.size();
-        }
-
-        for (std::size_t i = 0; i < data.size() && result.size() < contentMax; ++i)
-        {
-            unsigned char uc = static_cast<unsigned char>(data[i]);
-            // 출력 가능한 ASCII + 일부 공백 문자 허용
-            if (uc >= 32 && uc < 127)
-            {
-                result += static_cast<char>(uc);
-            }
-            else if (uc == '\r' || uc == '\n' || uc == '\t')
-            {
-                result += static_cast<char>(uc);  // SIP 메시지 구조 유지
-            }
-            else
-            {
-                result += '.';  // 비출력 문자는 .으로 대체
-            }
-        }
-
-        if (data.size() > maxLen)
-        {
-            if (maxLen > suffixLen)
-            {
-                result += suffix;
-            }
-            else if (maxLen > 0)
-            {
-                // Not enough room for full suffix: return its leading part
-                result = suffix.substr(0, maxLen);
-            }
-            // if maxLen == 0, result remains empty
-        }
-
-        return result;
     }
 }
 
@@ -313,6 +241,12 @@ void UdpServer::recvLoop()
                 continue;
             }
 
+            // Socket closed during shutdown — exit cleanly
+            if (errno == EBADF)
+            {
+                break;
+            }
+
             logError("recvfrom");
             continue;
         }
@@ -404,7 +338,7 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
         std::cout << "------------------------------------------\n";
         std::cout << "[Worker " << workerId << "] from "
                 << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-        std::cout << sanitizeLogData(pkt.data) << "\n";
+        std::cout << sanitizeForDisplay(pkt.data, MAX_LOG_DATA_LENGTH) << "\n";
     }
 
     // SIP 메시지 파싱
@@ -435,7 +369,7 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
                     std::lock_guard<std::mutex> lock(g_logMutex);
                     std::cout << "[Worker " << workerId << "] SIP response sent to "
                               << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-                    std::cout << sanitizeLogData(response) << "\n";
+                    std::cout << sanitizeForDisplay(response, MAX_LOG_DATA_LENGTH) << "\n";
                 }
                 else
                 {
@@ -464,7 +398,7 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
         {
             std::lock_guard<std::mutex> lock(g_logMutex);
             std::cout << "[Worker " << workerId << "] Forwarded SIP response for Call-ID "
-                      << sanitizeLogData(getHeader(msg, "call-id")) << "\n";
+                      << sanitizeForDisplay(getHeader(msg, "call-id"), MAX_LOG_DATA_LENGTH) << "\n";
         }
         else
         {

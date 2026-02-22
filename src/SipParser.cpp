@@ -149,7 +149,17 @@ bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
             std::string value = trim(line.substr(colon + 1));
 
             lastHeaderName = name;
-            out.headers[name] = value;
+
+            // 동일 이름 헤더가 이미 존재하면 콤마로 결합 (RFC 3261 Section 7.3.1)
+            auto existing = out.headers.find(name);
+            if (existing != out.headers.end())
+            {
+                existing->second += ", " + value;
+            }
+            else
+            {
+                out.headers[name] = value;
+            }
             ++headerCount;
         }
 

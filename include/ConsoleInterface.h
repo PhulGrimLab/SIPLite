@@ -59,9 +59,6 @@ private:
     // 콘솔 입력 검증
     static bool validateConsoleInput(const std::string& input);
     
-    // 출력용 문자열 정화 (로그 인젝션 방지)
-    static std::string sanitizeOutput(const std::string& input, std::size_t maxLen = 50);
-    
     void processCommand(const std::string& cmd);
     
     void showServerStatus();
@@ -74,9 +71,7 @@ private:
     // 유틸리티 함수들
     // ================================
     
-    static std::string trim(std::string_view s);
     static std::string truncate(std::string_view s, std::size_t maxLen);
-    static std::string extractUser(std::string_view uri);
     static std::string formatRemainingTime(long remaining);
     static std::string formatDuration(long seconds);
     

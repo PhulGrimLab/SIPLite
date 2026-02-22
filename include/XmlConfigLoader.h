@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SipCore.h"
+#include "SipUtils.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -55,22 +56,22 @@ public:
             std::cerr << "[XmlConfigLoader] 보안: 허용되지 않은 파일 경로\n";
             return terminals;
         }
-        
+
         // 파일 존재 여부 확인
         std::error_code ec;
         if (!std::filesystem::exists(filePath, ec) || ec)
         {
-            std::cerr << "[XmlConfigLoader] 파일이 존재하지 않습니다: " << sanitizeForLog(filePath) << "\n";
+            std::cerr << "[XmlConfigLoader] 파일이 존재하지 않습니다: " << sanitizeForDisplay(filePath, 100, '?', false) << "\n";
             return terminals;
         }
-        
+
         // 심볼릭 링크 체크
         if (std::filesystem::is_symlink(filePath, ec))
         {
             std::cerr << "[XmlConfigLoader] 보안: 심볼릭 링크 비허용\n";
             return terminals;
         }
-        
+
         // 파일 크기 검증
         auto fileSize = std::filesystem::file_size(filePath, ec);
         if (ec || fileSize > MAX_FILE_SIZE || fileSize == 0)
@@ -78,14 +79,14 @@ public:
             std::cerr << "[XmlConfigLoader] 파일 크기 오류 또는 제한 초과\n";
             return terminals;
         }
-        
+
         std::ifstream file(filePath, std::ios::binary);
         if (!file.is_open())
         {
             std::cerr << "[XmlConfigLoader] 파일을 열 수 없습니다\n";
             return terminals;
         }
-        
+
         std::string content;
         try
         {
@@ -96,7 +97,7 @@ public:
             std::cerr << "[XmlConfigLoader] 메모리 할당 실패\n";
             return terminals;
         }
-        
+
         file.read(content.data(), static_cast<std::streamsize>(fileSize));
         file.close();
         
@@ -106,7 +107,7 @@ public:
             std::cerr << "[XmlConfigLoader] 보안: 위험한 XML 패턴 감지\n";
             return terminals;
         }
-        
+
         // XML 파싱 (정규식 없이 문자열 검색)
         std::size_t pos = 0;
         while (pos < content.size() && terminals.size() < MAX_TERMINALS)
@@ -137,7 +138,7 @@ public:
             // IP 주소 검증
             if (!isValidIpAddress(config.ip))
             {
-                std::cerr << "[XmlConfigLoader] 잘못된 IP 주소: " << sanitizeForLog(config.ip) << "\n";
+                std::cerr << "[XmlConfigLoader] 잘못된 IP 주소: " << sanitizeForDisplay(config.ip, 100, '?', false) << "\n";
                 pos = termEnd + 11;
                 continue;
             }
@@ -145,7 +146,7 @@ public:
             // AOR 검증
             if (!isValidAor(config.aor))
             {
-                std::cerr << "[XmlConfigLoader] 잘못된 AOR: " << sanitizeForLog(config.aor) << "\n";
+                std::cerr << "[XmlConfigLoader] 잘못된 AOR: " << sanitizeForDisplay(config.aor, 100, '?', false) << "\n";
                 pos = termEnd + 11;
                 continue;
             }
@@ -153,7 +154,7 @@ public:
             // Contact 검증
             if (!isValidContact(config.contact))
             {
-                std::cerr << "[XmlConfigLoader] 잘못된 Contact: " << sanitizeForLog(config.contact) << "\n";
+                std::cerr << "[XmlConfigLoader] 잘못된 Contact: " << sanitizeForDisplay(config.contact, 100, '?', false) << "\n";
                 pos = termEnd + 11;
                 continue;
             }
@@ -192,7 +193,7 @@ public:
         std::cout << "[XmlConfigLoader] " << terminals.size() << "개의 단말 정보 로드 완료\n";
         return terminals;
     }
-    
+
     // SipCore에 단말 등록
     static std::size_t registerTerminals(SipCore& sipCore, 
                                           const std::vector<TerminalConfig>& terminals)
@@ -204,22 +205,21 @@ public:
                                           term.ip, term.port, term.expiresSec))
             {
                 ++count;
-                std::cout << "  - 등록: " << sanitizeForLog(term.aor);
+                std::cout << "  - 등록: " << sanitizeForDisplay(term.aor, 100, '?', false);
                 if (!term.description.empty())
                 {
-                    std::cout << " (" << sanitizeForLog(term.description) << ")";
+                    std::cout << " (" << sanitizeForDisplay(term.description, 100, '?', false) << ")";
                 }
                 std::cout << "\n";
             }
             else
             {
-                std::cerr << "  - 등록 실패: " << sanitizeForLog(term.aor) << "\n";
+                std::cerr << "  - 등록 실패: " << sanitizeForDisplay(term.aor, 100, '?', false) << "\n";
             }
         }
         return count;
     }
 
-private:
     // 파일 경로 보안 검증
     static bool validateFilePath(const std::string& path)
     {
@@ -235,10 +235,7 @@ private:
         }
         
         // 경로를 소문자로 변환하여 패턴 검사
-        std::string lowerPath = path;
-        // 소문자로 변환 (대소문자 구분 없이 검사하기 위해)
-        std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
-                      [](unsigned char c) { return std::tolower(c); });
+        std::string lowerPath = toLower(path);
         
         // 위험한 경로 패턴 체크
         const char* dangerousPatterns[] = {
@@ -258,13 +255,7 @@ private:
         
         // 허용된 확장자만
         std::filesystem::path p(path);
-        std::string ext = p.extension().string();
-        /*
-        구조: std::transform(시작1, 끝1, 결과저장시작, 변환함수).
-        주의: 결과 저장 공간(result)은 미리 크기가 할당(resize)되어 있거나 std::back_inserter를 사용해야 함. 
-        */
-        std::transform(ext.begin(), ext.end(), ext.begin(),
-                      [](unsigned char c) { return std::tolower(c); });
+        std::string ext = toLower(p.extension().string());
         
         if (ext != ".xml")
         {
@@ -273,7 +264,7 @@ private:
         
         return true;
     }
-    
+
     // XML 콘텐츠 보안 검증 (XXE 방지)
     //  XXE(XML External Entity) 공격과 SSRF(Server-Side Request Forgery) 방지를 위한 것입니다.
     static bool validateXmlContent(const std::string& content)
@@ -339,35 +330,8 @@ private:
         
         return true;
     }
-    
-    // 로그 출력용 문자열 정화
-    static std::string sanitizeForLog(const std::string& input)
-    {
-        std::string result;
-        result.reserve(std::min(input.size(), static_cast<std::size_t>(100)));
-        
-        for (char c : input)
-        {
-            if (result.size() >= 100)
-            {
-                result += "...";
-                break;
-            }
-            
-            // 출력 가능한 ASCII만 허용, 위험 문자 필터링
-            if (c >= 32 && c < 127 && c != '<' && c != '>')
-            {
-                result += c;
-            }
-            else
-            {
-                result += '?';
-            }
-        }
-        
-        return result;
-    }
-    
+
+private:
     // IPv4 주소 검증 (선행 0 검사 포함)
     static bool isValidIpAddress(const std::string& ip)
     {
@@ -435,7 +399,7 @@ private:
         
         return octets == 3;
     }
-    
+
     // AOR 형식 검증 (강화된 버전)
     static bool isValidAor(const std::string& aor)
     {
@@ -478,7 +442,7 @@ private:
         
         return true;
     }
-    
+
     // Contact URI 검증
     static bool isValidContact(const std::string& contact)
     {
@@ -505,7 +469,7 @@ private:
         
         return true;
     }
-    
+
     // 포트 파싱 (std::from_chars 사용 - 예외 없음)
     static bool parsePort(std::string_view portStr, uint16_t& outPort)
     {
@@ -531,7 +495,7 @@ private:
         outPort = static_cast<uint16_t>(val);
         return true;
     }
-    
+
     // Expires 파싱 (std::from_chars 사용 - 예외 없음)
     static bool parseExpires(std::string_view expiresStr, int& outExpires)
     {
@@ -563,7 +527,7 @@ private:
         }
         return true;
     }
-    
+
     // XML 태그 추출 (최적화된 버전 - 정규식 없이, 엔티티 디코딩 포함)
     static std::string extractTag(const std::string& xml, const std::string& tag)
     {
@@ -590,12 +554,12 @@ private:
         }
         
         std::string value = xml.substr(startPos, endPos - startPos);
-        value = trim(value);
+        value = ::trim(value);
         
         // XML 엔티티 디코딩
         return decodeXmlEntities(value);
     }
-    
+
     // XML 엔티티 디코딩
     static std::string decodeXmlEntities(const std::string& input)
     {
@@ -662,17 +626,5 @@ private:
         }
         
         return result;
-    }
-    
-    static std::string trim(std::string_view s)
-    {
-        constexpr std::string_view ws = " \t\r\n";
-        const auto start = s.find_first_not_of(ws);
-        if (start == std::string_view::npos)
-        {
-            return "";
-        }
-        const auto end = s.find_last_not_of(ws);
-        return std::string(s.substr(start, end - start + 1));
     }
 };
