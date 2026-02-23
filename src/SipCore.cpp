@@ -85,17 +85,20 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
         return false;
     }
 
-    // CSeq 메서드 확인: CANCEL 응답(200 OK for CANCEL)은 프록시에서 소비
-    // callee가 CANCEL에 대해 보내는 200 OK는 handleCancel에서 이미 처리됨
-    // pendingInvites_는 INVITE 트랜잭션만 관리하므로 CANCEL 응답은 무시
+    // CSeq 메서드 확인: pendingInvites_는 INVITE 트랜잭션만 관리
+    // INVITE 이외의 응답(CANCEL 200 OK, CANCEL 400 등)은 프록시에서 소비
+    // 일부 SIP 구현체는 CANCEL 거부 시 CSeq 메서드를 다르게 보낼 수 있으므로
+    // INVITE만 통과시키는 화이트리스트 방식이 안전함
     {
         std::string cseqMethod = parseCSeqMethod(cseq);
         std::string cseqMethodUpper = cseqMethod;
         std::transform(cseqMethodUpper.begin(), cseqMethodUpper.end(),
                        cseqMethodUpper.begin(), ::toupper);
-        if (cseqMethodUpper == "CANCEL")
+        // CSeq 메서드가 존재하고 INVITE가 아닌 경우 → 소비 (CANCEL, BYE 등의 응답)
+        // CSeq 메서드가 비어있는 경우(파싱 실패) → 안전하게 INVITE로 간주하여 통과
+        if (!cseqMethodUpper.empty() && cseqMethodUpper != "INVITE")
         {
-            return true;  // CANCEL 200 OK 소비 — 추가 처리 불필요
+            return true;  // Non-INVITE 응답 소비 — 추가 처리 불필요
         }
     }
 
@@ -1187,6 +1190,11 @@ std::string SipCore::buildAckForPending(const PendingInvite& pi, const std::stri
         while (!via.empty() && via.back() == ' ') via.pop_back();
     }
     if (!via.empty()) oss << "Via: " << via << "\r\n";
+
+    // Max-Forwards 추출 — RFC 3261 §8.1.1: 모든 SIP 요청에 필수
+    std::string maxFwd = sanitizeHeaderValue(getHeader(req, "max-forwards"));
+    if (maxFwd.empty()) maxFwd = "70";
+    oss << "Max-Forwards: " << maxFwd << "\r\n";
 
     if (!fromHdr.empty()) oss << "From: " << fromHdr << "\r\n";
     if (!toHdr.empty())   oss << "To: " << toHdr << "\r\n";
