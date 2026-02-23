@@ -100,7 +100,14 @@ int main(int argc, char* argv[])
     UdpServer server;
     const std::string bindIp = "0.0.0.0";
     const uint16_t bindPort = 5060;     // 표준 SIP 포트
-    const std::size_t workerCount = 8;
+
+    // 워커 스레드 수: CPU 논리 코어 수 기반 자동 설정
+    // 수신/콘솔/메인 스레드를 고려하여 (논리코어 수 - 1), 최소 1개, 최대 8개
+    unsigned int hwThreads = std::thread::hardware_concurrency();
+    if (hwThreads == 0) hwThreads = 2; // 감지 실패 시 보수적 기본값
+    std::size_t workerCount = std::max<std::size_t>(1, std::min<std::size_t>(hwThreads - 1, 8));
+    Logger::instance().info("[초기화] CPU 논리 코어: " + std::to_string(hwThreads)
+                         + ", 워커 스레드: " + std::to_string(workerCount));
 
     // 단말 설정 로드
     std::cout << "[초기화] 단말 설정 파일 로드 중: " << configPath << "\n";
