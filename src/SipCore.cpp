@@ -1219,11 +1219,20 @@ std::string SipCore::buildCancelForPending(const PendingInvite& pi) const
 
     int cseqNum = parseCSeqNum(cseq);
 
+    // Route 헤더 추출 — RFC 3261 §9.1: CANCEL은 원본 요청의 Route를 포함해야 함
+    std::string route = sanitizeHeaderValue(getHeader(req, "route"));
+
+    // Max-Forwards 추출 — RFC 3261 §8.1.1: 모든 SIP 요청에 필수
+    std::string maxFwd = sanitizeHeaderValue(getHeader(req, "max-forwards"));
+    if (maxFwd.empty()) maxFwd = "70";
+
     std::ostringstream oss;
     oss << "CANCEL " << requestUri << " SIP/2.0\r\n";
-    if (!via.empty())  oss << "Via: " << via << "\r\n";
-    if (!from.empty()) oss << "From: " << from << "\r\n";
-    if (!to.empty())   oss << "To: " << to << "\r\n";
+    if (!via.empty())    oss << "Via: " << via << "\r\n";
+    oss << "Max-Forwards: " << maxFwd << "\r\n";
+    if (!route.empty())  oss << "Route: " << route << "\r\n";
+    if (!from.empty())   oss << "From: " << from << "\r\n";
+    if (!to.empty())     oss << "To: " << to << "\r\n";
     if (!callId.empty()) oss << "Call-ID: " << callId << "\r\n";
     oss << "CSeq: " << cseqNum << " CANCEL\r\n";
     oss << "Content-Length: 0\r\n\r\n";
