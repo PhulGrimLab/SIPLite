@@ -39,12 +39,19 @@ private:
     void workerLoop(std::size_t workerId);
     void handlePacket(std::size_t workerId, const UdpPacket& pkt);
 
+    // Call-ID 기반 워커 라우팅 (같은 통화의 모든 패킷은 항상 같은 워커에서 처리)
+    std::size_t routeToWorker(const std::string& callId) const;
+    static std::string extractCallIdQuick(const std::string& data);
+
 private:
     std::atomic<int> sock_;
     std::atomic<bool> running_;
     std::thread recvThread_;
     std::vector<std::thread> workerThreads_;
-    ConcurrentQueue<UdpPacket> queue_;
+
+    // 워커별 전용 큐 (Call-ID 해시 기반 라우팅)
+    std::vector<std::unique_ptr<ConcurrentQueue<UdpPacket>>> workerQueues_;
+    std::size_t workerCount_ = 0;
     
     SipCore sipCore_;
 };

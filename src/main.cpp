@@ -100,7 +100,7 @@ int main(int argc, char* argv[])
     UdpServer server;
     const std::string bindIp = "0.0.0.0";
     const uint16_t bindPort = 5060;     // 표준 SIP 포트
-    const std::size_t workerCount = 1;
+    const std::size_t workerCount = 8;
 
     // 단말 설정 로드
     std::cout << "[초기화] 단말 설정 파일 로드 중: " << configPath << "\n";

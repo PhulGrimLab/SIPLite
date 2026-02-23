@@ -12,6 +12,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <functional>
 
 // static 변수 대신에 namespace 사용
 namespace
@@ -30,6 +31,38 @@ namespace
 
     constexpr std::size_t RECV_BUFFER_SIZE = 65536; // UDP 수신 버퍼 크기 (최대 SIP 메시지 크기)
     constexpr std::size_t MAX_LOG_DATA_LENGTH = 200; // 로그 출력 최대 길이
+
+    // 전체 SIP 파싱 없이 Call-ID만 빠르게 추출
+    // recvLoop에서 워커 라우팅 시 사용 — 전체 파싱보다 훨씬 가벼움
+    std::string extractCallIdQuickImpl(const std::string& data)
+    {
+        // "Call-ID:", "call-id:", "Call-Id:", "i:" (compact form) 검색
+        static const char* patterns[] = {
+            "\r\nCall-ID:", "\r\ncall-id:", "\r\nCall-Id:",
+            "\r\ni:", nullptr
+        };
+
+        for (const char** p = patterns; *p; ++p)
+        {
+            auto pos = data.find(*p);
+            if (pos != std::string::npos)
+            {
+                pos += std::strlen(*p);
+                // 공백 건너뛰기
+                while (pos < data.size() && data[pos] == ' ') ++pos;
+
+                // \r\n까지 추출
+                auto end = data.find("\r\n", pos);
+                if (end == std::string::npos) end = data.size();
+
+                std::string callId = data.substr(pos, end - pos);
+                // 후행 공백 제거
+                while (!callId.empty() && callId.back() == ' ') callId.pop_back();
+                return callId;
+            }
+        }
+        return {};
+    }
 
     // 스레드 안전한 로그 에러 로깅 (perror 대체)
     void logError(const char* prefix)
@@ -62,6 +95,20 @@ UdpServer::~UdpServer()
     stop();
 }
 
+// Call-ID에서 워커 인덱스 결정 (해시 기반 — 같은 Call-ID는 항상 같은 워커로)
+std::size_t UdpServer::routeToWorker(const std::string& callId) const
+{
+    if (workerCount_ == 0) return 0;
+    std::size_t hash = std::hash<std::string>{}(callId);
+    return hash % workerCount_;
+}
+
+// static wrapper
+std::string UdpServer::extractCallIdQuick(const std::string& data)
+{
+    return extractCallIdQuickImpl(data);
+}
+
 bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCount)
 {
     // 이미 실행 중인지 확인
@@ -72,8 +119,15 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
         return false;
     }
 
-    // 이전 shutdown 상태 초기화 (재시작 지원)
-    queue_.reset();
+    workerCount_ = workerCount;
+
+    // 워커별 전용 큐 생성 (이전 상태 초기화 포함)
+    workerQueues_.clear();
+    workerQueues_.reserve(workerCount);
+    for (std::size_t i = 0; i < workerCount; ++i)
+    {
+        workerQueues_.push_back(std::make_unique<ConcurrentQueue<UdpPacket>>());
+    }
 
     if (!bindSocket(ip, port))
     {
@@ -126,7 +180,7 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
         workerThreads_.emplace_back(&UdpServer::workerLoop, this, i);
     }
 
-    Logger::instance().info(std::string("[UdpServer] started at ") + ip + ":" + std::to_string(port) + " with " + std::to_string(workerCount) + " workers");
+    Logger::instance().info(std::string("[UdpServer] started at ") + ip + ":" + std::to_string(port) + " with " + std::to_string(workerCount) + " workers (call-affinity routing)");
     return true;
 }
 
@@ -139,8 +193,11 @@ void UdpServer::stop()
         return; // 이미 중지 상태
     }
 
-    // 워커 스레드 종료 알림
-    queue_.shutdown();
+    // 모든 워커 큐 종료 알림
+    for (auto& q : workerQueues_)
+    {
+        q->shutdown();
+    }
 
     // 수신 스레드 깨우기 위해 소켓 닫기 (double-close 방지)
     int sock = sock_.exchange(-1);
@@ -155,7 +212,6 @@ void UdpServer::stop()
         recvThread_.join();
     }
 
-
     // 워커 스레드 종료 대기
     for (auto& thread : workerThreads_)
     {
@@ -166,6 +222,8 @@ void UdpServer::stop()
     }
 
     workerThreads_.clear();
+    workerQueues_.clear();
+    workerCount_ = 0;
 
     Logger::instance().info("[UdpServer] Stopped");
 }
@@ -293,10 +351,14 @@ void UdpServer::recvLoop()
         pkt.remotePort = ntohs(src.sin_port);
         pkt.data.assign(buf, static_cast<std::size_t>(n));
 
-        // 큐에 넣기 (move semantics 사용)
-        if (!queue_.push(std::move(pkt)))
+        // Call-ID 기반으로 워커 라우팅 (같은 통화의 모든 패킷은 항상 같은 워커에서 순서대로 처리)
+        std::string callId = extractCallIdQuick(pkt.data);
+        std::size_t workerIdx = callId.empty() ? 0 : routeToWorker(callId);
+
+        if (!workerQueues_[workerIdx]->push(std::move(pkt)))
         {
-            Logger::instance().error(std::string("[UdpServer] Warning: Packet queue full or shutting down, dropping packet from ")
+            Logger::instance().error(std::string("[UdpServer] Warning: Worker queue[") + std::to_string(workerIdx)
+                      + "] full or shutting down, dropping packet from "
                       + pkt.remoteIp + ":" + std::to_string(pkt.remotePort));
         }
     }
@@ -311,7 +373,7 @@ void UdpServer::workerLoop(std::size_t workerId)
     while (true)
     {
         UdpPacket pkt;
-        if (!queue_.pop(pkt))
+        if (!workerQueues_[workerId]->pop(pkt))
         {
             break; // 큐가 비어있거나 종료 상태
         }
