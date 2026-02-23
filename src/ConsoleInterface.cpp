@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdio>
 #include <ctime>
+#include <set>
 
 #ifdef __unix__
 #include <unistd.h> // for ::close and STDIN_FILENO
@@ -308,28 +309,57 @@ void ConsoleInterface::showRegisteredTerminals()
     // 등록된 단말 정보 출력
     auto& sipCore = server_.sipCore();
     const auto registrations = sipCore.getAllRegistrations();
+    const auto activeCalls = sipCore.getAllActiveCalls();
     const auto now = std::chrono::steady_clock::now();
+
+    // 활성 통화에 참여 중인 AOR 집합 구성 (fromUri, toUri 모두 확인)
+    std::set<std::string> busyAors;
+    for (const auto& call : activeCalls)
+    {
+        busyAors.insert(call.fromUri);
+        busyAors.insert(call.toUri);
+    }
 
     std::ostringstream oss;
     oss << "\n"
-        << "┌──────────────────────────────────────────────────────────────────────────────┐\n"
-        << "│                            등록된 단말 현황                                  │\n"
-        << "├──────────────────────────────────────────────────────────────────────────────┤\n";
+        << "┌──────────────────────────────────────────────────────────────────────────────────────┐\n"
+        << "│                                 등록된 단말 현황                                     │\n"
+        << "├──────────────────────────────────────────────────────────────────────────────────────┤\n";
 
     if (registrations.empty())
     {
-        oss << "│  등록된 단말이 없습니다.                                                     │\n";
+        oss << "│  등록된 단말이 없습니다.                                                              │\n";
     }
     else
     {
-        oss << "│  번호   AOR                            IP:Port              만료까지         │\n"
-            << "├──────────────────────────────────────────────────────────────────────────────┤\n";
+        oss << "│  번호   AOR                            IP:Port              만료까지       상태        │\n"
+            << "├──────────────────────────────────────────────────────────────────────────────────────┤\n";
 
         int idx = 1;
+        std::size_t activeCount = 0;
         for (const auto& reg : registrations)
         {
             const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
                 reg.expiresAt - now).count();
+
+            bool expired = (remaining <= 0);
+            bool inCall = busyAors.count(reg.aor) > 0;
+
+            std::string status;
+            if (expired)
+            {
+                status = "만료";
+            }
+            else if (inCall)
+            {
+                status = "통화중";
+                ++activeCount;
+            }
+            else
+            {
+                status = "대기";
+                ++activeCount;
+            }
 
             std::array<char, 32> ipPortBuf{};
             std::snprintf(ipPortBuf.data(), ipPortBuf.size(),
@@ -339,15 +369,22 @@ void ConsoleInterface::showRegisteredTerminals()
                 << "  " << std::setw(30) << std::left << truncate(reg.aor, 28)
                 << "  " << std::setw(20) << std::left << ipPortBuf.data()
                 << "  " << std::setw(12) << std::left << formatRemainingTime(remaining)
+                << "  " << std::setw(10) << std::left << status
                 << "│\n";
             ++idx;
         }
+
+        oss << "├──────────────────────────────────────────────────────────────────────────────────────┤\n"
+            << "│  활성: " << std::left << std::setw(3) << activeCount
+            << "  통화중: " << std::left << std::setw(3) << busyAors.size()
+            << "  만료: " << std::left << std::setw(3) << (registrations.size() - activeCount)
+            << "                                                          │\n";
     }
 
-    oss << "├──────────────────────────────────────────────────────────────────────────────┤\n"
+    oss << "├──────────────────────────────────────────────────────────────────────────────────────┤\n"
         << "│  총 " << std::left << std::setw(3) << registrations.size()
-        << "개의 단말이 등록되어 있습니다.                                           │\n"
-        << "└──────────────────────────────────────────────────────────────────────────────┘\n";
+        << "개의 단말이 등록되어 있습니다.                                                    │\n"
+        << "└──────────────────────────────────────────────────────────────────────────────────────┘\n";
 
     std::cout << oss.str();
 }
