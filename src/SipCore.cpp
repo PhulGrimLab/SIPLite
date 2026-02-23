@@ -500,7 +500,6 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
 
     // 보류 CANCEL 처리용 변수 (락 밖에서 네트워크 전송을 위해)
     bool deferredCancel = false;
-    std::string cancelForCallee;
     std::string resp487ForCaller;
 
     // ===== ActiveCall + PendingInvite를 하나의 락 구간에서 원자적으로 생성 =====
@@ -538,6 +537,8 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         pi.calleePort = regCopy.port;
         // 프록시 Via가 추가된 버전을 저장하여, CANCEL/ACK 생성 시 callee가 받은 Via와 일치하도록 함
         pi.origRequest = fwdInvite;
+        // caller의 원본 INVITE를 저장하여, 487 응답 생성 시 프록시 Via 없는 버전을 사용
+        pi.callerRequest = pkt.data;
         pi.ts = std::chrono::steady_clock::now();
         pi.state = TxState::TRYING;
         pi.lastResponse = buildSimpleResponse(msg, 100, "Trying");
@@ -554,17 +555,9 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
             deferredCancel = true;
             Logger::instance().info("[handleInvite] Deferred CANCEL found, cancelling immediately: key=" + key);
 
-            auto& piRef = pendingInvites_[key];
-
-            // callee에게 전달할 CANCEL 생성
-            cancelForCallee = buildCancelForPending(piRef);
-
             // caller에게 보낼 487 Request Terminated 생성
-            SipMessage pendingReq;
-            if (parseSipMessage(piRef.origRequest, pendingReq))
-            {
-                resp487ForCaller = buildSimpleResponse(pendingReq, 487, "Request Terminated");
-            }
+            // msg는 caller의 원본 INVITE(프록시 Via 없음)이므로 Via branch가 일치
+            resp487ForCaller = buildSimpleResponse(msg, 487, "Request Terminated");
 
             // 자료구조 정리
             pendingInvites_.erase(key);
@@ -578,12 +571,9 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     {
         if (sender_)
         {
-            // INVITE를 callee에게 보낸 후 즉시 CANCEL 전송
-            sender_(regCopy.ip, regCopy.port, fwdInvite);
-            if (!cancelForCallee.empty())
-            {
-                sender_(regCopy.ip, regCopy.port, cancelForCallee);
-            }
+            // 이미 취소된 통화이므로 callee에게 INVITE 전송 불필요
+            // INVITE+CANCEL을 동시에 보내면 UDP 순서 역전으로 CANCEL이 먼저 도달할 수 있음
+            // caller에게 487 응답만 전송
             if (!resp487ForCaller.empty())
             {
                 sender_(pkt.remoteIp, pkt.remotePort, resp487ForCaller);
@@ -839,11 +829,12 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
             // callee에게 전달할 CANCEL 생성
             cancelRaw = buildCancelForPending(pit->second);
 
-            // caller에게 보낼 487 Request Terminated 생성 (#2 fix)
-            SipMessage pendingReq;
-            if (parseSipMessage(pit->second.origRequest, pendingReq))
+            // caller에게 보낼 487 Request Terminated 생성
+            // caller의 원본 INVITE(프록시 Via 없음)로 생성하여 Via branch가 일치하도록 함
+            SipMessage callerReq;
+            if (parseSipMessage(pit->second.callerRequest, callerReq))
             {
-                resp487 = buildSimpleResponse(pendingReq, 487, "Request Terminated");
+                resp487 = buildSimpleResponse(callerReq, 487, "Request Terminated");
             }
 
             // PendingInvite 정리 — 제거
@@ -1176,8 +1167,15 @@ std::string SipCore::buildAckForPending(const PendingInvite& pi, const std::stri
     std::ostringstream oss;
     oss << "ACK " << requestUri << " SIP/2.0\r\n";
 
-    // RFC 3261 §17.1.1.3: ACK의 Via는 원본 요청의 top Via 사용
-    std::string via = sanitizeHeaderValue(getHeader(req, "via"));
+    // RFC 3261 §17.1.1.3: ACK의 Via는 원본 요청의 top Via만 사용
+    // 파서가 여러 Via를 콤마로 결합하므로, 첫 번째(상단) Via만 추출
+    std::string allVias = sanitizeHeaderValue(getHeader(req, "via"));
+    std::string via;
+    {
+        auto commaPos = allVias.find(',');
+        via = (commaPos != std::string::npos) ? allVias.substr(0, commaPos) : allVias;
+        while (!via.empty() && via.back() == ' ') via.pop_back();
+    }
     if (!via.empty()) oss << "Via: " << via << "\r\n";
 
     if (!fromHdr.empty()) oss << "From: " << fromHdr << "\r\n";
@@ -1214,11 +1212,20 @@ std::string SipCore::buildCancelForPending(const PendingInvite& pi) const
         requestUri = "sip:unknown";
     }
 
-    std::string via     = sanitizeHeaderValue(getHeader(req, "via"));
+    std::string allVias = sanitizeHeaderValue(getHeader(req, "via"));
     std::string from    = sanitizeHeaderValue(getHeader(req, "from"));
     std::string to      = sanitizeHeaderValue(getHeader(req, "to"));
     std::string callId  = sanitizeHeaderValue(getHeader(req, "call-id"));
     std::string cseq    = sanitizeHeaderValue(getHeader(req, "cseq"));
+
+    // RFC 3261 §9.1: CANCEL은 top Via 하나만 포함해야 함
+    // 파서가 여러 Via를 콤마로 결합하므로, 첫 번째(상단) Via만 추출
+    std::string via;
+    {
+        auto commaPos = allVias.find(',');
+        via = (commaPos != std::string::npos) ? allVias.substr(0, commaPos) : allVias;
+        while (!via.empty() && via.back() == ' ') via.pop_back();
+    }
 
     int cseqNum = parseCSeqNum(cseq);
 
