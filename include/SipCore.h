@@ -698,6 +698,10 @@ private:
     std::string addProxyVia(const std::string& rawMsg) const;
     std::string removeTopVia(const std::string& rawMsg) const;
 
+    // Request-URI 재작성 (RFC 3261 §16.6 step 6)
+    // 프록시가 INVITE를 callee에게 전달할 때, Request-URI를 callee의 Contact 주소로 변경
+    std::string rewriteRequestUri(const std::string& rawMsg, const std::string& newUri) const;
+
     std::string buildInviteResponse(const SipMessage& req,
                                     int code,
                                     const std::string& reason,

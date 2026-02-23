@@ -98,6 +98,15 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
         // CSeq 메서드가 비어있는 경우(파싱 실패) → 안전하게 INVITE로 간주하여 통과
         if (!cseqMethodUpper.empty() && cseqMethodUpper != "INVITE")
         {
+            // Non-2xx 응답 (CANCEL 거부 등)은 경고 로그 출력
+            if (msg.statusCode >= 400)
+            {
+                Logger::instance().info("[handleResponse] Non-INVITE error consumed:"
+                    " method=" + cseqMethodUpper
+                    + " status=" + std::to_string(msg.statusCode)
+                    + " callId=" + callId
+                    + " from=" + pkt.remoteIp + ":" + std::to_string(pkt.remotePort));
+            }
             return true;  // Non-INVITE 응답 소비 — 추가 처리 불필요
         }
     }
@@ -533,7 +542,13 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     std::string toTag = generateTag();
 
     // 프록시 Via가 추가된 INVITE를 먼저 생성 — CANCEL/ACK 생성 시에도 동일한 Via가 필요
+    // RFC 3261 §16.6 step 6: Request-URI를 callee의 Contact 주소로 변경
+    std::string contactUri = extractUriFromHeader(regCopy.contact);
     std::string fwdInvite = addProxyVia(pkt.data);
+    if (!contactUri.empty())
+    {
+        fwdInvite = rewriteRequestUri(fwdInvite, contactUri);
+    }
 
     // 보류 CANCEL 처리용 변수 (락 밖에서 네트워크 전송을 위해)
     bool deferredCancel = false;
@@ -888,6 +903,14 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
         {
             // callee에게 CANCEL 전달
             sender_(calleeIp, calleePort, cancelRaw);
+            Logger::instance().info("[handleCancel] CANCEL forwarded to callee: "
+                + calleeIp + ":" + std::to_string(calleePort) + " key=" + key);
+        }
+        else
+        {
+            Logger::instance().info("[handleCancel] CANCEL not sent: cancelRaw.empty="
+                + std::to_string(cancelRaw.empty()) + " calleeIp.empty="
+                + std::to_string(calleeIp.empty()) + " key=" + key);
         }
         // 487은 프록시가 직접 생성하지 않음 —
         // callee의 487 응답이 handleResponse를 통해 자연스럽게 caller에게 전달됨
@@ -1012,6 +1035,39 @@ std::string SipCore::generateTag() const
     std::ostringstream oss;
     oss << std::hex << dis(gen);
     return oss.str();
+}
+
+// Request-URI 재작성 (RFC 3261 §16.6 step 6)
+// 프록시가 INVITE를 callee에게 전달할 때, Request-URI를 callee의 Contact 주소로 변경
+// 예: "INVITE sip:1001@proxy SIP/2.0" → "INVITE sip:1001@callee:5060 SIP/2.0"
+std::string SipCore::rewriteRequestUri(const std::string& rawMsg, const std::string& newUri) const
+{
+    if (newUri.empty()) return rawMsg;
+
+    // request-line: METHOD SP Request-URI SP SIP-Version CRLF
+    auto lineEnd = rawMsg.find("\r\n");
+    if (lineEnd == std::string::npos) return rawMsg;
+
+    std::string requestLine = rawMsg.substr(0, lineEnd);
+
+    // 첫 번째 공백 (METHOD 뒤)
+    auto sp1 = requestLine.find(' ');
+    if (sp1 == std::string::npos) return rawMsg;
+
+    // 두 번째 공백 (Request-URI 뒤)
+    auto sp2 = requestLine.find(' ', sp1 + 1);
+    if (sp2 == std::string::npos) return rawMsg;
+
+    std::string method = requestLine.substr(0, sp1);
+    std::string version = requestLine.substr(sp2 + 1);
+
+    std::string newRequestLine = method + " " + newUri + " " + version;
+
+    std::string result;
+    result.reserve(newRequestLine.size() + 2 + rawMsg.size() - lineEnd);
+    result.append(newRequestLine);
+    result.append(rawMsg, lineEnd);  // CRLF + 나머지 헤더 + 바디
+    return result;
 }
 
 // 프록시 Via 헤더 추가 (RFC 3261 §16.6)
