@@ -85,6 +85,20 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
         return false;
     }
 
+    // CSeq 메서드 확인: CANCEL 응답(200 OK for CANCEL)은 프록시에서 소비
+    // callee가 CANCEL에 대해 보내는 200 OK는 handleCancel에서 이미 처리됨
+    // pendingInvites_는 INVITE 트랜잭션만 관리하므로 CANCEL 응답은 무시
+    {
+        std::string cseqMethod = parseCSeqMethod(cseq);
+        std::string cseqMethodUpper = cseqMethod;
+        std::transform(cseqMethodUpper.begin(), cseqMethodUpper.end(),
+                       cseqMethodUpper.begin(), ::toupper);
+        if (cseqMethodUpper == "CANCEL")
+        {
+            return true;  // CANCEL 200 OK 소비 — 추가 처리 불필요
+        }
+    }
+
     // callId + cseqNum을 키로 하여 pendingInvites_에서 해당 INVITE 트랜잭션이 존재하는지 확인
     // SIP 응답은 일반적으로 INVITE 트랜잭션과 연관되어 처리된다.
     // 따라서 응답 메시지의 call-id와 cseq 헤더를 기반으로 해당 트랜잭션이 pendingInvites_에 존재하는지 확인해야 한다.
@@ -805,9 +819,6 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
     std::string calleeIp;
     uint16_t calleePort = 0;
     std::string cancelRaw;
-    std::string resp487;
-    std::string callerIp;
-    uint16_t callerPort = 0;
     bool foundPending = false;
 
     {
@@ -820,33 +831,16 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
         {
             foundPending = true;
 
-            // PendingInvite에서 callee 정보 가져오기 (#1 fix)
+            // PendingInvite에서 callee 정보 가져오기
             calleeIp = pit->second.calleeIp;
             calleePort = pit->second.calleePort;
-            callerIp = pit->second.callerIp;
-            callerPort = pit->second.callerPort;
 
             // callee에게 전달할 CANCEL 생성
             cancelRaw = buildCancelForPending(pit->second);
 
-            // caller에게 보낼 487 Request Terminated 생성
-            // caller의 원본 INVITE(프록시 Via 없음)로 생성하여 Via branch가 일치하도록 함
-            SipMessage callerReq;
-            if (parseSipMessage(pit->second.callerRequest, callerReq))
-            {
-                resp487 = buildSimpleResponse(callerReq, 487, "Request Terminated");
-            }
-
-            // PendingInvite 정리 — 제거
-            // SIP CANCEL 요청이 처리된 경우에는 해당 트랜잭션을 pendingInvites_에서 제거하여 SIP 흐름 관리에 반영한다.
-            pendingInvites_.erase(pit);
-
-            // ActiveCall 및 Dialog 정리
-            // SIP CANCEL 요청이 처리된 경우에는 해당 통화와 관련된 ActiveCall과 Dialog를 정리하여 SIP 흐름 관리에 반영한다.
-            activeCalls_.erase(callId);
-
-            // Dialog도 제거 — SIP 흐름 관리에 반영
-            dialogs_.erase(callId);
+            // pendingInvite를 삭제하지 않음 — callee의 487 응답이 handleResponse를 통해
+            // 정상적으로 처리되도록 함 (caller에게 487 전달 + callee에게 ACK)
+            // RFC 3261 §16.10: 프록시는 CANCEL을 전달하고, callee의 응답을 그대로 caller에게 전달해야 함
         }
         else
         {
@@ -869,15 +863,11 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
     {
         if (!cancelRaw.empty() && !calleeIp.empty())
         {
-            // SIP CANCEL 요청이 처리된 경우에는 sender_ 콜백을 통해 네트워크로 CANCEL 메시지를 전송한다.
+            // callee에게 CANCEL 전달
             sender_(calleeIp, calleePort, cancelRaw);
         }
-
-        if (!resp487.empty() && !callerIp.empty())
-        {
-            // SIP CANCEL 요청이 처리된 경우에는 sender_ 콜백을 통해 네트워크로 487 Request Terminated 메시지를 전송한다.
-            sender_(callerIp, callerPort, resp487);
-        }
+        // 487은 프록시가 직접 생성하지 않음 —
+        // callee의 487 응답이 handleResponse를 통해 자연스럽게 caller에게 전달됨
     }
 
     return true;
