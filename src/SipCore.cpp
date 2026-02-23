@@ -133,6 +133,24 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
             return false;
         }
 
+        // === COMPLETED 상태에서 3xx-6xx 재전송 흡수 (RFC 3261 §17.1.1.2 Timer D) ===
+        // 이미 처리된 에러 응답의 재전송인 경우, ACK만 다시 보내고 caller에게는 재전달하지 않음
+        // callee가 ACK를 못 받으면(UDP 손실 등) 동일한 에러 응답을 재전송하는데,
+        // pendingInvite가 COMPLETED 상태로 남아있어야 ACK를 재전송할 수 있음
+        if (it->second.state == TxState::COMPLETED && msg.statusCode >= 300)
+        {
+            std::string ack = buildAckForPending(it->second, pkt.data);
+            if (!ack.empty())
+            {
+                ackIp = pkt.remoteIp;
+                ackPort = pkt.remotePort;
+                ackData = std::move(ack);
+            }
+            // fwdData는 비워둠 — caller에게 재전달하지 않음 (이미 첫 응답에서 전달 완료)
+        }
+        else
+        {
+
         // Collect forwarding info (send outside lock)
         // 프록시가 추가한 Via를 제거하여 caller에게 전달 (RFC 3261 §16.7)
         fwdIp = it->second.callerIp;
@@ -241,14 +259,16 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
                     ackData = std::move(ack);
                 }
 
-                // 에러 응답 시 ActiveCall, Dialog, PendingInvite 정리
-                // 3xx-6xx 거절 시 pendingInvites_를 즉시 제거하여,
-                // 동일 callId:cseqNum 키의 새로운 INVITE가 재전송으로 오탐되지 않도록 한다.
+                // 에러 응답 시 ActiveCall, Dialog 정리
+                // PendingInvite는 COMPLETED 상태로 유지 — Timer D(32초) 동안
+                // callee의 에러 응답 재전송을 흡수하기 위함 (RFC 3261 §17.1.1.2)
+                // cleanupStaleTransactions()가 expiry 이후 자동 정리함
                 activeCalls_.erase(callId);
                 dialogs_.erase(callId);
-                pendingInvites_.erase(it);
             }
         }
+
+        } // else (non-COMPLETED 처리 끝)
     } // all locks released
 
     // Send outside locks (#3 fix)
