@@ -695,9 +695,19 @@ bool SipCore::handleAck(const UdpPacket& pkt,
         auto it = activeCalls_.find(callId);
         if (it != activeCalls_.end())
         {
+            Logger::instance().info("[handleAck] ActiveCall found: callId=" + callId
+                + " callerIp=" + it->second.callerIp + ":" + std::to_string(it->second.callerPort)
+                + " calleeIp=" + it->second.calleeIp + ":" + std::to_string(it->second.calleePort)
+                + " pktFrom=" + pkt.remoteIp + ":" + std::to_string(pkt.remotePort));
+
             it->second.confirmed = true;
             ackFwdIp = it->second.calleeIp;
             ackFwdPort = it->second.calleePort;
+        }
+        else
+        {
+            Logger::instance().error("[handleAck] ActiveCall NOT found: callId=" + callId
+                + " pktFrom=" + pkt.remoteIp + ":" + std::to_string(pkt.remotePort));
         }
 
         auto dit = dialogs_.find(callId);
