@@ -221,6 +221,17 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
                         dlg.created = std::chrono::steady_clock::now();
                         dlg.confirmed = false;
 
+                        // callee의 Contact 헤더에서 remote target 추출 (in-dialog 라우팅용)
+                        std::string contactHdr200 = sanitizeHeaderValue(getHeader(msg, "contact"));
+                        dlg.remoteTarget = extractUriFromHeader(contactHdr200);
+
+                        // ActiveCall의 toTag를 callee의 실제 태그로 갱신
+                        // (handleInvite에서 생성한 프록시 태그를 callee의 태그로 교체)
+                        if (!dlg.calleeTag.empty())
+                        {
+                            acIt->second.toTag = dlg.calleeTag;
+                        }
+
                         std::string body = msg.body;
                         std::string ctype = sanitizeHeaderValue(getHeader(msg, "content-type"));
                         if (!body.empty())
@@ -545,6 +556,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     // RFC 3261 §16.6 step 6: Request-URI를 callee의 Contact 주소로 변경
     std::string contactUri = extractUriFromHeader(regCopy.contact);
     std::string fwdInvite = addProxyVia(pkt.data);
+    fwdInvite = addRecordRoute(fwdInvite);  // Record-Route 추가 — in-dialog 요청이 프록시를 경유하도록 보장
     if (!contactUri.empty())
     {
         fwdInvite = rewriteRequestUri(fwdInvite, contactUri);
@@ -641,9 +653,9 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         sender_(regCopy.ip, regCopy.port, fwdInvite);
     }
 
-    // SIP 흐름 관리에 필요한 처리를 수행한 후, 
-    // 필요한 경우 적절한 SIP 응답 메시지를 생성하여 outResponse에 반환할 수 있도록 구현되어 있다.
-    outResponse = buildInviteResponse(msg, 180, "Ringing", toTag, "");
+    // 프록시는 180 Ringing을 직접 생성하지 않음 — callee의 provisional 응답이
+    // handleResponse를 통해 caller에게 전달됨 (To 태그 일관성 보장)
+    outResponse.clear();
 
     return true;
 }
@@ -701,7 +713,10 @@ bool SipCore::handleAck(const UdpPacket& pkt,
     // Send ACK to callee outside all locks
     if (sender_ && !ackFwdIp.empty())
     {
-        sender_(ackFwdIp, ackFwdPort, pkt.data);    // ACK 메시지를 sender_ 콜백을 통해 네트워크로 전송할 수 있도록 한다.
+        // ACK에 프록시 Via 추가 및 자신을 가리키는 Route 헤더 제거 후 전달
+        std::string fwdAck = addProxyVia(pkt.data);
+        fwdAck = stripOwnRoute(fwdAck);
+        sender_(ackFwdIp, ackFwdPort, fwdAck);
     }
 
     // SIP ACK 요청은 일반적으로 SIP 흐름 관리에 필요한 처리를 수행한 후, 
@@ -809,8 +824,10 @@ bool SipCore::handleBye(const UdpPacket& pkt,
         // BYE를 상대방에게 전달 (B2BUA/프록시 동작)
         if (sender_ && !fwdIp.empty())
         {
-            // SIP BYE 요청이 처리된 경우에는 sender_ 콜백을 통해 네트워크로 BYE 메시지를 전송한다.
-            sender_(fwdIp, fwdPort, pkt.data);
+            // BYE에 프록시 Via 추가 및 자신을 가리키는 Route 헤더 제거 후 전달
+            std::string fwdBye = addProxyVia(pkt.data);
+            fwdBye = stripOwnRoute(fwdBye);
+            sender_(fwdIp, fwdPort, fwdBye);
         }
     }
     else
@@ -1128,6 +1145,69 @@ std::string SipCore::removeTopVia(const std::string& rawMsg) const
     if (viaPos > 0) result.append(afterFirstLine, 0, viaPos);
     result.append(afterFirstLine, viaLineEnd + 2);
     return result;
+}
+
+// Record-Route 헤더 추가 (RFC 3261 §16.6 step 4)
+// INVITE를 callee에게 전달할 때, 프록시의 Record-Route를 삽입하여
+// 이후 in-dialog 요청(ACK, BYE, re-INVITE 등)이 반드시 프록시를 경유하도록 보장한다.
+// Linphone 등 UA는 200 OK에 포함된 Record-Route를 Route Set으로 저장하여
+// 이후 요청에 Route 헤더로 추가한다.
+std::string SipCore::addRecordRoute(const std::string& rawMsg) const
+{
+    auto pos = rawMsg.find("\r\n");
+    if (pos == std::string::npos) return rawMsg;
+
+    std::string addr = localAddr_.empty() ? "127.0.0.1" : localAddr_;
+    uint16_t port = localPort_ ? localPort_ : 5060;
+
+    // lr 파라미터: loose routing (RFC 3261 §16.6)
+    std::string rr = "Record-Route: <sip:" + addr + ":" + std::to_string(port) + ";lr>\r\n";
+
+    std::string result;
+    result.reserve(rawMsg.size() + rr.size());
+    result.append(rawMsg, 0, pos + 2);  // request-line + \r\n
+    result.append(rr);
+    result.append(rawMsg, pos + 2);     // 나머지 헤더 + 바디
+    return result;
+}
+
+// 자신을 가리키는 Route 헤더 제거 (loose routing 처리, RFC 3261 §16.4)
+// Linphone이 Route: <sip:proxy:port;lr>을 포함하여 보낸 ACK/BYE에서
+// 프록시 자신을 가리키는 Route 헤더를 제거한 후 다음 홉으로 전달한다.
+std::string SipCore::stripOwnRoute(const std::string& rawMsg) const
+{
+    std::string addr = localAddr_.empty() ? "127.0.0.1" : localAddr_;
+    uint16_t port = localPort_ ? localPort_ : 5060;
+    std::string selfUri = addr + ":" + std::to_string(port);
+
+    // Route 헤더 검색 (대소문자 무시)
+    std::string lower = toLower(rawMsg);
+    std::size_t searchPos = 0;
+
+    while (true)
+    {
+        std::size_t pos = lower.find("\r\nroute:", searchPos);
+        if (pos == std::string::npos) break;
+
+        pos += 2;  // \r\n 건너뛰기
+        std::size_t lineEnd = rawMsg.find("\r\n", pos);
+        if (lineEnd == std::string::npos) break;
+
+        std::string line = rawMsg.substr(pos, lineEnd - pos);
+        if (line.find(selfUri) != std::string::npos)
+        {
+            // 이 Route 라인 제거
+            std::string result;
+            result.reserve(rawMsg.size());
+            result.append(rawMsg, 0, pos);
+            result.append(rawMsg, lineEnd + 2);
+            return result;
+        }
+
+        searchPos = lineEnd + 2;
+    }
+
+    return rawMsg;
 }
 
 // Helper function to build SIP response for INVITE requests

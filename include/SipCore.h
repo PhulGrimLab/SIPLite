@@ -318,6 +318,7 @@ public:
         uint16_t calleePort = 0;
         int cseq = 0;
         bool confirmed = false;  // true after ACK
+        std::string remoteTarget;  // callee's Contact URI (for in-dialog request routing)
         std::chrono::steady_clock::time_point created;
     };
 
@@ -697,6 +698,14 @@ private:
     // 프록시 Via 헤더 관리 (RFC 3261 §16.6/§16.7)
     std::string addProxyVia(const std::string& rawMsg) const;
     std::string removeTopVia(const std::string& rawMsg) const;
+
+    // Record-Route 헤더 추가 (RFC 3261 §16.6 step 4)
+    // 프록시가 INVITE를 전달할 때 Record-Route를 추가하여,
+    // 이후 in-dialog 요청(ACK, BYE, re-INVITE)이 프록시를 경유하도록 보장
+    std::string addRecordRoute(const std::string& rawMsg) const;
+
+    // 자신을 가리키는 Route 헤더 제거 (loose routing, RFC 3261 §16.4)
+    std::string stripOwnRoute(const std::string& rawMsg) const;
 
     // Request-URI 재작성 (RFC 3261 §16.6 step 6)
     // 프록시가 INVITE를 callee에게 전달할 때, Request-URI를 callee의 Contact 주소로 변경

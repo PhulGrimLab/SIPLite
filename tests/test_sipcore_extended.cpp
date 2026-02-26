@@ -942,17 +942,37 @@ void test_cancel_active_invite()
     // CANCEL에 대한 200 OK
     assert(resp.find("200 OK") != std::string::npos);
 
-    // 487 Request Terminated가 caller에게 전송되어야 함
-    bool found487 = false;
+    // CANCEL이 callee에게 전달되어야 함
     bool foundCancelToCallee = false;
     for (const auto& m : sent) {
-        if (m.data.find("487") != std::string::npos)
-            found487 = true;
         if (m.data.find("CANCEL") != std::string::npos && m.ip == "10.0.0.1")
             foundCancelToCallee = true;
     }
-    assert(found487);
     assert(foundCancelToCallee);
+
+    // 487은 callee의 487 응답이 handleResponse를 통해 caller에게 전달됨
+    // callee의 487 응답 시뮬레이션
+    sent.clear();
+    std::string resp487Raw =
+        "SIP/2.0 487 Request Terminated\r\n"
+        "Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-proxy-test;rport\r\n"
+        "Via: SIP/2.0/UDP caller:5060\r\n"
+        "From: <sip:1002@client>;tag=inv-tag\r\n"
+        "To: <sip:1001@server>;tag=callee-tag\r\n"
+        "Call-ID: cancel-call\r\n"
+        "CSeq: 1 INVITE\r\n"
+        "Content-Length: 0\r\n\r\n";
+    assert(parseSipMessage(resp487Raw, msg));
+    UdpPacket resp487Pkt{"10.0.0.1", 5060, resp487Raw};
+    bool handled = core->handleResponse(resp487Pkt, msg);
+    assert(handled);
+
+    bool found487 = false;
+    for (const auto& m : sent) {
+        if (m.data.find("487") != std::string::npos && m.ip == "10.0.0.2")
+            found487 = true;
+    }
+    assert(found487);
     // ActiveCall이 정리되어야 함
     assert(core->activeCallCount() == 0);
     PASS();
