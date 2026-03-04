@@ -225,6 +225,9 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
                         std::string contactHdr200 = sanitizeHeaderValue(getHeader(msg, "contact"));
                         dlg.remoteTarget = extractUriFromHeader(contactHdr200);
 
+                        // caller의 Contact URI를 PendingInvite에서 복사 (BYE 전달 시 사용)
+                        dlg.callerContact = it->second.callerContact;
+
                         // ActiveCall의 toTag를 callee의 실제 태그로 갱신
                         // (handleInvite에서 생성한 프록시 태그를 callee의 태그로 교체)
                         if (!dlg.calleeTag.empty())
@@ -598,6 +601,11 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         pi.callerIp = pkt.remoteIp;
         pi.callerPort = pkt.remotePort;
         pi.calleeIp = regCopy.ip;
+        // caller의 Contact URI 저장 (BYE 전달 시 Request-URI 재작성용)
+        {
+            std::string callerContactHdr = sanitizeHeaderValue(getHeader(msg, "contact"));
+            pi.callerContact = extractUriFromHeader(callerContactHdr);
+        }
         pi.calleePort = regCopy.port;
         // 프록시 Via가 추가된 버전을 저장하여, CANCEL/ACK 생성 시 callee가 받은 Via와 일치하도록 함
         pi.origRequest = fwdInvite;
@@ -760,6 +768,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
     bool found = false;
     std::string fwdIp;
     uint16_t fwdPort = 0;
+    std::string fwdContactUri;  // 상대방의 Contact URI (Request-URI 재작성용)
     {
         // 올바른 뮤텍스 순서로 동시에 잠금
         std::lock_guard<std::mutex> lockCall(callMutex_);
@@ -775,13 +784,17 @@ bool SipCore::handleBye(const UdpPacket& pkt,
             if (pkt.remoteIp == dit->second.callerIp &&
                 pkt.remotePort == dit->second.callerPort)
             {
+                // caller가 BYE 보냄 → callee에게 전달
                 fwdIp = dit->second.calleeIp;
                 fwdPort = dit->second.calleePort;
+                fwdContactUri = dit->second.remoteTarget;  // callee의 Contact URI
             }
             else
             {
+                // callee가 BYE 보냄 → caller에게 전달
                 fwdIp = dit->second.callerIp;
                 fwdPort = dit->second.callerPort;
+                fwdContactUri = dit->second.callerContact; // caller의 Contact URI
             }
 
             dialogs_.erase(dit);    // Dialog를 삭제하여 SIP 흐름 관리에 반영한다.
@@ -837,6 +850,19 @@ bool SipCore::handleBye(const UdpPacket& pkt,
             // BYE에 프록시 Via 추가 및 자신을 가리키는 Route 헤더 제거 후 전달
             std::string fwdBye = addProxyVia(pkt.data);
             fwdBye = stripOwnRoute(fwdBye);
+
+            // RFC 3261 §16.6: Request-URI를 상대방의 Contact URI로 재작성
+            // 원래 BYE의 Request-URI가 상대방의 실제 Contact과 다를 수 있으므로
+            // Dialog에 저장된 Contact URI로 재작성하여 정확한 라우팅 보장
+            if (!fwdContactUri.empty())
+            {
+                fwdBye = rewriteRequestUri(fwdBye, fwdContactUri);
+            }
+
+            Logger::instance().info("[handleBye] Forwarding BYE: callId=" + callId
+                + " to=" + fwdIp + ":" + std::to_string(fwdPort)
+                + " contactUri=" + (fwdContactUri.empty() ? "(none)" : fwdContactUri));
+
             sender_(fwdIp, fwdPort, fwdBye);
         }
     }

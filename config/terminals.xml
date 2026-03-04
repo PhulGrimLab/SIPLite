@@ -7,7 +7,7 @@
         <ip>192.168.1.101</ip>
         <port>5060</port>
         <expires>3600</expires>
-        <description>회의실 A 전화기</description>
+        <description>Test1</description>
     </terminal>
     
     <terminal>
@@ -16,7 +16,7 @@
         <ip>192.168.1.102</ip>
         <port>5060</port>
         <expires>3600</expires>
-        <description>회의실 B 전화기</description>
+        <description>Test2</description>
     </terminal>
     
     <terminal>
@@ -25,6 +25,24 @@
         <ip>192.168.1.103</ip>
         <port>5060</port>
         <expires>7200</expires>
-        <description>로비 전화기</description>
+        <description>Test3</description>
+    </terminal>
+
+    <terminal>
+        <aor>sip:1004@192.168.1.100</aor>
+        <contact>sip:1004@192.168.1.104:5060</contact>
+        <ip>192.168.1.104</ip>
+        <port>5060</port>
+        <expires>7200</expires>
+        <description>Test4</description>
+
+    </terminal>
+        <terminal>
+        <aor>sip:1005@192.168.1.100</aor>
+        <contact>sip:1005@192.168.1.105:5060</contact>
+        <ip>192.168.1.105</ip>
+        <port>5060</port>
+        <expires>7200</expires>
+        <description>Test5</description>
     </terminal>
 </terminals>

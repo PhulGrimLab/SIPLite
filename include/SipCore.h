@@ -319,6 +319,7 @@ public:
         int cseq = 0;
         bool confirmed = false;  // true after ACK
         std::string remoteTarget;  // callee's Contact URI (for in-dialog request routing)
+        std::string callerContact; // caller's Contact URI (for BYE forwarding to caller)
         std::chrono::steady_clock::time_point created;
     };
 
@@ -749,6 +750,7 @@ private:
         uint16_t calleePort = 0;       // 수신자 Port
         std::string origRequest;       // 프록시 Via가 추가된 INVITE (callee에게 전달된 버전) — CANCEL/ACK 생성용
         std::string callerRequest;     // caller의 원본 INVITE (프록시 Via 없음) — 487 응답 생성용
+        std::string callerContact;     // caller's Contact URI (from INVITE Contact header)
         std::string lastResponse;      // last raw response forwarded back to caller
         TxState state = TxState::TRYING;
         int attempts = 0;              // retransmission attempts observed
