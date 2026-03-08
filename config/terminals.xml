@@ -1,47 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <terminals>
     <!-- 단말 등록 정보 -->
+    <!-- ip/contact/port는 선택사항: 생략 시 SIP REGISTER에서 실제 단말 주소로 자동 설정 -->
     <terminal>
         <aor>sip:1001@192.168.0.23</aor>
-        <contact>sip:1001@192.168.0.23:5060</contact>
-        <ip>192.168.0.23</ip>
-        <port>5060</port>
         <expires>3600</expires>
         <description>Test1</description>
     </terminal>
     
     <terminal>
         <aor>sip:1002@192.168.0.23</aor>
-        <contact>sip:1002@192.168.0.23:5060</contact>
-        <ip>192.168.0.23</ip>
-        <port>5060</port>
         <expires>3600</expires>
         <description>Test2</description>
     </terminal>
     
     <terminal>
         <aor>sip:1003@192.168.0.23</aor>
-        <contact>sip:1003@192.168.0.23:5060</contact>
-        <ip>192.168.0.23</ip>
-        <port>5060</port>
         <expires>7200</expires>
         <description>Test3</description>
     </terminal>
 
     <terminal>
         <aor>sip:1004@192.168.0.23</aor>
-        <contact>sip:1004@192.168.0.23:5060</contact>
-        <ip>192.168.0.23</ip>
-        <port>5060</port>
         <expires>7200</expires>
         <description>Test4</description>
-
     </terminal>
-        <terminal>
+
+    <terminal>
         <aor>sip:1005@192.168.0.23</aor>
-        <contact>sip:1005@192.168.0.23:5060</contact>
-        <ip>192.168.0.23</ip>
-        <port>5060</port>
         <expires>7200</expires>
         <description>Test5</description>
     </terminal>

@@ -749,6 +749,19 @@ private:
     mutable std::mutex regMutex_;
     std::map<std::string, Registration> regs_;
 
+    // AOR의 사용자 부분(user part)으로 regs_ 검색 (regMutex_ 홀드 상태에서 호출)
+    std::map<std::string, Registration>::iterator findByUser_(const std::string& aor)
+    {
+        std::string user = extractUserFromUri(aor);
+        if (user.empty()) return regs_.end();
+        for (auto it = regs_.begin(); it != regs_.end(); ++it)
+        {
+            if (extractUserFromUri(it->first) == user)
+                return it;
+        }
+        return regs_.end();
+    }
+
     mutable std::mutex callMutex_;
     std::map<std::string, ActiveCall> activeCalls_;
 

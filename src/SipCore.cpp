@@ -348,15 +348,17 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
         return true;
     }
 
-    // XML에 등록된 단말만 REGISTER 허용 (화이트리스트 방식)
+    // XML에 등록된 단말만 REGISTER 허용 (사용자 ID로 매칭)
+    std::string matchedAor;
     {
         std::lock_guard<std::mutex> lock(regMutex_);
-        auto it = regs_.find(aor);
+        auto it = findByUser_(aor);
         if (it == regs_.end() || !it->second.isStatic)
         {
             outResponse = buildSimpleResponse(msg, 403, "Forbidden");
             return true;
         }
+        matchedAor = it->first;
     }
 
     // Expires 헤더 또는 Contact 헤더의 expires 파라미터에서 유효 시간(TTL)을 추출하여 등록의 만료 시점을 계산한다.
@@ -419,7 +421,7 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
     if (expiresSec == 0)
     {
         std::lock_guard<std::mutex> lock(regMutex_);
-        auto it = regs_.find(aor);
+        auto it = regs_.find(matchedAor);
         if (it != regs_.end())
         {
             if (it->second.isStatic)
@@ -437,7 +439,7 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
     }
 
     Registration reg;
-    reg.aor      = aor;
+    reg.aor      = matchedAor;  // XML에 등록된 원래 AOR 유지
     reg.contact  = contactHdr;
     reg.ip       = pkt.remoteIp;
     reg.port     = pkt.remotePort;
@@ -448,7 +450,7 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
 
     {
         std::lock_guard<std::mutex> lock(regMutex_);
-        regs_[aor] = reg;
+        regs_[matchedAor] = reg;
     }
 
     outResponse = buildRegisterOk(msg);
@@ -480,16 +482,16 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     // To 헤더에서 URI를 추출하여 등록된 사용자 정보와 매칭한다.
     std::string toUri = extractUriFromHeader(toHdr);
 
-    std::string targetAor = toUri;
     Registration regCopy;
     bool found = false;
 
     {
         std::lock_guard<std::mutex> lock(regMutex_);
-        auto it = regs_.find(targetAor);
+        auto it = findByUser_(toUri);
         if (it != regs_.end())
         {
-            if (it->second.expiresAt > std::chrono::steady_clock::now())
+            if (it->second.expiresAt > std::chrono::steady_clock::now()
+                && it->second.loggedIn)
             {
                 regCopy = it->second;
                 found = true;
