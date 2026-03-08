@@ -787,6 +787,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
     }
 
     bool found = false;
+    bool isSecondBye = false;  // cross-BYE (상대편도 BYE 보냄)
     std::string fwdIp;
     uint16_t fwdPort = 0;
     std::string fwdContactUri;  // 상대방의 Contact URI (Request-URI 재작성용)
@@ -818,7 +819,19 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                 fwdContactUri = dit->second.callerContact; // caller의 Contact URI
             }
 
-            dialogs_.erase(dit);    // Dialog를 삭제하여 SIP 흐름 관리에 반영한다.
+            if (dit->second.byeReceived)
+            {
+                // 두 번째 BYE (cross-BYE) → Dialog 삭제
+                isSecondBye = true;
+                dialogs_.erase(dit);
+            }
+            else
+            {
+                // 첫 번째 BYE → 삭제하지 않고 표시만
+                dit->second.byeReceived = true;
+                dit->second.byeSenderIp = pkt.remoteIp;
+                dit->second.byeSenderPort = pkt.remotePort;
+            }
         }
 
         // ActiveCall에서도 상대방 정보 조회 (Dialog가 없는 경우)
@@ -841,20 +854,29 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                 }
             }
 
-            activeCalls_.erase(it);    // ActiveCall에서 해당 통화를 삭제하여 SIP 흐름 관리에 반영한다.
+            if (it->second.byeReceived || isSecondBye)
+            {
+                // 두 번째 BYE → ActiveCall 삭제
+                activeCalls_.erase(it);
+            }
+            else
+            {
+                // 첫 번째 BYE → 삭제하지 않고 표시만
+                it->second.byeReceived = true;
+                it->second.byeSenderIp = pkt.remoteIp;
+                it->second.byeSenderPort = pkt.remotePort;
+            }
         }
 
-        // PendingInvite 정리
+        // PendingInvite 정리 (BYE 수신 시 항상)
         for (auto pit = pendingInvites_.begin(); pit != pendingInvites_.end(); )
         {
             if (pit->first.rfind(callId + ":", 0) == 0)
             {
-                // 해당 Call-ID로 시작하는 모든 PendingInvite를 pendingInvites_에서 제거하여 SIP 흐름 관리에 반영한다.
                 pit = pendingInvites_.erase(pit);   
             }
             else
             {
-                // Call-ID가 일치하지 않는 경우에는 다음 PendingInvite로 이동한다.
                 ++pit;
             }
         }

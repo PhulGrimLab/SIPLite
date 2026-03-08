@@ -303,6 +303,9 @@ public:
         uint16_t calleePort = 0;
         std::chrono::steady_clock::time_point startTime;
         bool confirmed = false;
+        bool byeReceived = false;  // 첫 번째 BYE 수신 여부 (cross-BYE 처리용)
+        std::string byeSenderIp;   // BYE를 보낸 쪽 IP
+        uint16_t byeSenderPort = 0;
         // Store last SDP body and content-type seen for this call (pass-through)
         std::string lastSdp;
         std::string lastSdpContentType;
@@ -320,6 +323,9 @@ public:
         uint16_t calleePort = 0;
         int cseq = 0;
         bool confirmed = false;  // true after ACK
+        bool byeReceived = false;  // 첫 번째 BYE 수신 여부
+        std::string byeSenderIp;
+        uint16_t byeSenderPort = 0;
         std::string remoteTarget;  // callee's Contact URI (for in-dialog request routing)
         std::string callerContact; // caller's Contact URI (for BYE forwarding to caller)
         std::chrono::steady_clock::time_point created;
@@ -402,30 +408,44 @@ public:
         for (auto it = activeCalls_.begin(); it != activeCalls_.end(); )
         {
             // 미확립 통화가 maxAge(기본 5분) 이상 경과하면 정리
-            if (!it->second.confirmed)
+            // BYE 수신 후 30초 경과한 통화도 정리
+            bool shouldRemove = false;
+            if (it->second.byeReceived)
+            {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - it->second.startTime);
+                shouldRemove = true;  // BYE 수신된 통화는 항상 정리 대상
+                (void)elapsed;
+            }
+            else if (!it->second.confirmed)
             {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     now - it->second.startTime);
                 if (elapsed > maxAge)
                 {
-                    std::string callId = it->first;
-
-                    // Dialog 정리
-                    dialogs_.erase(callId);
-
-                    // PendingInvite 정리
-                    for (auto pit = pendingInvites_.begin(); pit != pendingInvites_.end(); )
-                    {
-                        if (pit->first.rfind(callId + ":", 0) == 0)
-                            pit = pendingInvites_.erase(pit);
-                        else
-                            ++pit;
-                    }
-
-                    it = activeCalls_.erase(it);
-                    ++removed;
-                    continue;
+                    shouldRemove = true;
                 }
+            }
+
+            if (shouldRemove)
+            {
+                std::string callId = it->first;
+
+                // Dialog 정리
+                dialogs_.erase(callId);
+
+                // PendingInvite 정리
+                for (auto pit = pendingInvites_.begin(); pit != pendingInvites_.end(); )
+                {
+                    if (pit->first.rfind(callId + ":", 0) == 0)
+                        pit = pendingInvites_.erase(pit);
+                    else
+                        ++pit;
+                }
+
+                it = activeCalls_.erase(it);
+                ++removed;
+                continue;
             }
             ++it;
         }
