@@ -135,8 +135,8 @@ public:
             config.ip = extractTag(terminalBlock, "ip");
             config.description = extractTag(terminalBlock, "description");
             
-            // IP 주소 검증
-            if (!isValidIpAddress(config.ip))
+            // IP 주소 검증 (선택적 - 비어있으면 로그인 시 실제 패킷에서 설정됨)
+            if (!config.ip.empty() && !isValidIpAddress(config.ip))
             {
                 std::cerr << "[XmlConfigLoader] 잘못된 IP 주소: " << sanitizeForDisplay(config.ip, 100, '?', false) << "\n";
                 pos = termEnd + 11;

@@ -577,7 +577,7 @@ public:
                           uint16_t port,
                           int expiresSec = SipConstants::DEFAULT_EXPIRES_SEC)
     {
-        if (aor.empty() || ip.empty())
+        if (aor.empty())
         {
             return false; // 필수 매개변수 누락
         }
