@@ -153,6 +153,10 @@ bool SipCore::handlePacket(const UdpPacket& pkt,
     {
         return handleOptions(pkt, msg, outResponse);
     }
+    else if (methodUpper == "MESSAGE")
+    {
+        return handleMessage(pkt, msg, outResponse);
+    }
 
     // Unsupported method
     outResponse = buildSimpleResponse(msg, 501, "Not Implemented");
@@ -1217,13 +1221,139 @@ bool SipCore::handleOptions(const UdpPacket& pkt,
     if (!callId.empty()) oss << "Call-ID: " << callId << "\r\n";
     if (!cseq.empty())   oss << "CSeq: "    << cseq   << "\r\n";
 
-    oss << "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER\r\n";
+    oss << "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER, MESSAGE\r\n";
     oss << "Accept: application/sdp\r\n";
     oss << "Server: SIPLite/0.1\r\n";
     oss << "Content-Length: 0\r\n";
     oss << "\r\n";
 
     outResponse = oss.str();
+    return true;
+}
+
+// ================================
+// SIP MESSAGE 요청 처리 (RFC 3428)
+// ================================
+// SIP MESSAGE는 인스턴트 메시징을 위한 메서드로, 프록시는 수신자의 등록 정보를
+// 조회하여 메시지를 전달한다. In-dialog MESSAGE의 경우 기존 Dialog를 통해 상대방에게 전달한다.
+bool SipCore::handleMessage(const UdpPacket& pkt,
+                            const SipMessage& msg,
+                            std::string& outResponse)
+{
+    std::string toHdr   = sanitizeHeaderValue(getHeader(msg, "to"));
+    std::string fromHdr = sanitizeHeaderValue(getHeader(msg, "from"));
+    std::string callId  = sanitizeHeaderValue(getHeader(msg, "call-id"));
+
+    if (toHdr.empty() || fromHdr.empty() || callId.empty())
+    {
+        outResponse = buildSimpleResponse(msg, 400, "Bad Request");
+        return true;
+    }
+
+    // ===== In-dialog MESSAGE: 기존 Dialog가 있으면 상대방에게 전달 =====
+    {
+        std::lock_guard<std::mutex> lockDlg(dlgMutex_);
+        auto dit = dialogs_.find(callId);
+        if (dit != dialogs_.end() && dit->second.confirmed)
+        {
+            std::string fwdIp;
+            uint16_t fwdPort = 0;
+            std::string fwdContactUri;
+
+            if (pkt.remoteIp == dit->second.callerIp &&
+                pkt.remotePort == dit->second.callerPort)
+            {
+                fwdIp = dit->second.calleeIp;
+                fwdPort = dit->second.calleePort;
+                fwdContactUri = dit->second.remoteTarget;
+            }
+            else
+            {
+                fwdIp = dit->second.callerIp;
+                fwdPort = dit->second.callerPort;
+                fwdContactUri = dit->second.callerContact;
+            }
+
+            // Dialog 락 해제 후 네트워크 전송은 아래에서 수행
+            if (!fwdIp.empty() && sender_)
+            {
+                std::string fwdMsg = addProxyVia(pkt.data);
+                fwdMsg = decrementMaxForwards(fwdMsg);
+                fwdMsg = stripOwnRoute(fwdMsg);
+                if (!fwdContactUri.empty())
+                {
+                    fwdMsg = rewriteRequestUri(fwdMsg, fwdContactUri);
+                }
+
+                sender_(fwdIp, fwdPort, fwdMsg);
+
+                Logger::instance().info("[handleMessage] In-dialog MESSAGE forwarded: callId=" + callId
+                    + " to=" + fwdIp + ":" + std::to_string(fwdPort));
+            }
+
+            outResponse = buildSimpleResponse(msg, 200, "OK");
+            return true;
+        }
+    }
+
+    // ===== Out-of-dialog MESSAGE: 등록 정보에서 수신자 조회 =====
+    std::string toUri = extractUriFromHeader(toHdr);
+
+    Registration regCopy;
+    bool found = false;
+    bool knownButOffline = false;
+
+    {
+        std::lock_guard<std::mutex> lock(regMutex_);
+        auto it = findByUser_(toUri);
+        if (it != regs_.end())
+        {
+            if (it->second.expiresAt > std::chrono::steady_clock::now()
+                && it->second.loggedIn)
+            {
+                regCopy = it->second;
+                found = true;
+            }
+            else if (it->second.isStatic)
+            {
+                knownButOffline = true;
+            }
+        }
+    }
+
+    if (!found)
+    {
+        if (knownButOffline)
+        {
+            outResponse = buildSimpleResponse(msg, 480, "Temporarily Unavailable");
+        }
+        else
+        {
+            outResponse = buildSimpleResponse(msg, 404, "Not Found");
+        }
+        return true;
+    }
+
+    // 수신자에게 MESSAGE 전달
+    std::string contactUri = extractUriFromHeader(regCopy.contact);
+    std::string fwdMsg = addProxyVia(pkt.data);
+    fwdMsg = decrementMaxForwards(fwdMsg);
+    if (!contactUri.empty())
+    {
+        fwdMsg = rewriteRequestUri(fwdMsg, contactUri);
+    }
+
+    if (sender_)
+    {
+        sender_(regCopy.ip, regCopy.port, fwdMsg);
+    }
+
+    outResponse = buildSimpleResponse(msg, 200, "OK");
+
+    Logger::instance().info("[handleMessage] Forwarded MESSAGE: callId=" + callId
+        + " from=" + pkt.remoteIp + ":" + std::to_string(pkt.remotePort)
+        + " to=" + regCopy.ip + ":" + std::to_string(regCopy.port));
+
     return true;
 }
 

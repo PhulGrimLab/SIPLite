@@ -1595,6 +1595,297 @@ void test_invite_with_compact_headers()
     PASS();
 }
 
+// Helper: MESSAGE 요청 생성
+static std::string makeMessage(const std::string& toUri,
+                                const std::string& fromUri,
+                                const std::string& callId,
+                                int cseq,
+                                const std::string& body = "",
+                                const std::string& contentType = "text/plain",
+                                const std::string& fromTag = "msg-tag")
+{
+    std::string raw =
+        "MESSAGE " + toUri + " SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP sender:5060\r\n"
+        "From: <" + fromUri + ">;tag=" + fromTag + "\r\n"
+        "To: <" + toUri + ">\r\n"
+        "Call-ID: " + callId + "\r\n"
+        "CSeq: " + std::to_string(cseq) + " MESSAGE\r\n";
+    if (!body.empty())
+    {
+        raw += "Content-Type: " + contentType + "\r\n";
+        raw += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+        raw += "\r\n";
+        raw += body;
+    }
+    else
+    {
+        raw += "Content-Length: 0\r\n\r\n";
+    }
+    return raw;
+}
+
+// ================================
+// 34) MESSAGE → 등록된 사용자에게 전달 + 200 OK
+// ================================
+
+void test_message_to_registered_user()
+{
+    TEST("MESSAGE to registered user → forwarded + 200 OK");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    preRegisterAndLogin(*core, sent, "sip:1001@server", "<sip:1001@10.0.0.1:5060>",
+                        "10.0.0.1", 5060, "msg-reg");
+    sent.clear();
+
+    std::string raw = makeMessage("sip:1001@server", "sip:1002@client", "msg-call-1", 1,
+                                   "Hello, World!", "text/plain");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    // 200 OK 응답 확인
+    assert(resp.find("200 OK") != std::string::npos);
+
+    // 수신자에게 전달된 MESSAGE 확인
+    bool forwarded = false;
+    for (const auto& m : sent) {
+        if (m.data.find("MESSAGE") != std::string::npos && m.ip == "10.0.0.1") {
+            forwarded = true;
+            // body 보존 확인
+            assert(m.data.find("Hello, World!") != std::string::npos);
+        }
+    }
+    assert(forwarded);
+    PASS();
+}
+
+// ================================
+// 35) MESSAGE → 미등록 사용자 → 404 Not Found
+// ================================
+
+void test_message_to_unregistered_user()
+{
+    TEST("MESSAGE to unregistered user → 404 Not Found");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeMessage("sip:9999@server", "sip:1002@client", "msg-call-2", 1);
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("404 Not Found") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 36) MESSAGE → 오프라인 사용자 → 480 Temporarily Unavailable
+// ================================
+
+void test_message_to_offline_user()
+{
+    TEST("MESSAGE to offline user → 480 Temporarily Unavailable");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // isStatic 등록만 하고 REGISTER 로그인은 하지 않음
+    preRegister(*core, "sip:2001@server", "<sip:2001@10.0.0.5:5060>", "10.0.0.5", 5060);
+
+    std::string raw = makeMessage("sip:2001@server", "sip:1002@client", "msg-call-3", 1,
+                                   "Are you there?");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("480 Temporarily Unavailable") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 37) MESSAGE with body → body가 전달에서 보존됨
+// ================================
+
+void test_message_preserves_body()
+{
+    TEST("MESSAGE body and Content-Type preserved in forwarding");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    preRegisterAndLogin(*core, sent, "sip:1001@server", "<sip:1001@10.0.0.1:5060>",
+                        "10.0.0.1", 5060, "msg-reg2");
+    sent.clear();
+
+    std::string body = "{\"type\":\"chat\",\"text\":\"Hi!\"}";
+    std::string raw = makeMessage("sip:1001@server", "sip:1002@client", "msg-json", 1,
+                                   body, "application/json");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("200 OK") != std::string::npos);
+
+    bool bodyPreserved = false;
+    for (const auto& m : sent) {
+        if (m.data.find("MESSAGE") != std::string::npos && m.ip == "10.0.0.1") {
+            assert(m.data.find(body) != std::string::npos);
+            assert(m.data.find("application/json") != std::string::npos);
+            bodyPreserved = true;
+        }
+    }
+    assert(bodyPreserved);
+    PASS();
+}
+
+// ================================
+// 38) In-dialog MESSAGE → Dialog 상대방에게 전달
+// ================================
+
+void test_message_in_dialog()
+{
+    TEST("In-dialog MESSAGE forwarded to peer");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // caller(1002) → callee(1001) 통화 설정
+    preRegisterAndLogin(*core, sent, "sip:1001@server", "<sip:1001@10.0.0.1:5060>",
+                        "10.0.0.1", 5060, "dlg-msg-reg1");
+    preRegisterAndLogin(*core, sent, "sip:1002@server", "<sip:1002@10.0.0.2:5060>",
+                        "10.0.0.2", 5060, "dlg-msg-reg2");
+    sent.clear();
+
+    // INVITE → 전달
+    std::string invRaw = makeInvite("sip:1001@server", "sip:1002@client", "dlg-msg-call", 1, "inv-tag1");
+    SipMessage invMsg;
+    assert(parseSipMessage(invRaw, invMsg));
+    UdpPacket invPkt{"10.0.0.2", 5060, invRaw};
+    std::string invResp;
+    core->handlePacket(invPkt, invMsg, invResp);
+
+    // callee 200 OK 응답 시뮬레이트
+    std::string resp200 =
+        "SIP/2.0 200 OK\r\n"
+        "Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-proxy\r\n"
+        "Via: SIP/2.0/UDP caller:5060\r\n"
+        "From: <sip:1002@client>;tag=inv-tag1\r\n"
+        "To: <sip:1001@server>;tag=callee-tag\r\n"
+        "Call-ID: dlg-msg-call\r\n"
+        "CSeq: 1 INVITE\r\n"
+        "Contact: <sip:1001@10.0.0.1:5060>\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage resp200Msg;
+    assert(parseSipMessage(resp200, resp200Msg));
+    UdpPacket resp200Pkt{"10.0.0.1", 5060, resp200};
+    core->handleResponse(resp200Pkt, resp200Msg);
+
+    // ACK → Dialog confirmed
+    std::string ackRaw =
+        "ACK sip:1001@server SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP caller:5060\r\n"
+        "From: <sip:1002@client>;tag=inv-tag1\r\n"
+        "To: <sip:1001@server>;tag=callee-tag\r\n"
+        "Call-ID: dlg-msg-call\r\n"
+        "CSeq: 1 ACK\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage ackMsg;
+    assert(parseSipMessage(ackRaw, ackMsg));
+    UdpPacket ackPkt{"10.0.0.2", 5060, ackRaw};
+    std::string ackResp;
+    core->handlePacket(ackPkt, ackMsg, ackResp);
+
+    sent.clear();
+
+    // caller가 Dialog 내에서 MESSAGE 전송
+    std::string msgRaw =
+        "MESSAGE sip:1001@server SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP caller:5060\r\n"
+        "From: <sip:1002@client>;tag=inv-tag1\r\n"
+        "To: <sip:1001@server>;tag=callee-tag\r\n"
+        "Call-ID: dlg-msg-call\r\n"
+        "CSeq: 2 MESSAGE\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 13\r\n\r\n"
+        "Hello in call";
+    SipMessage sipMsg;
+    assert(parseSipMessage(msgRaw, sipMsg));
+    UdpPacket msgPkt{"10.0.0.2", 5060, msgRaw};
+    std::string msgResp;
+    core->handlePacket(msgPkt, sipMsg, msgResp);
+
+    // 200 OK 응답
+    assert(msgResp.find("200 OK") != std::string::npos);
+
+    // callee(10.0.0.1)에게 전달됨
+    bool fwdToCallee = false;
+    for (const auto& m : sent) {
+        if (m.data.find("MESSAGE") != std::string::npos && m.ip == "10.0.0.1") {
+            assert(m.data.find("Hello in call") != std::string::npos);
+            fwdToCallee = true;
+        }
+    }
+    assert(fwdToCallee);
+    PASS();
+}
+
+// ================================
+// 39) MESSAGE missing headers → 400 Bad Request
+// ================================
+
+void test_message_missing_headers()
+{
+    TEST("MESSAGE missing To header → 400 Bad Request");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // To 헤더 누락
+    std::string raw =
+        "MESSAGE sip:1001@server SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP sender:5060\r\n"
+        "From: <sip:1002@client>;tag=bad\r\n"
+        "Call-ID: msg-bad\r\n"
+        "CSeq: 1 MESSAGE\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("400 Bad Request") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 40) OPTIONS Allow 헤더에 MESSAGE 포함 확인
+// ================================
+
+void test_options_includes_message_in_allow()
+{
+    TEST("OPTIONS Allow header includes MESSAGE");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeOptions("sip:server", "opt-msg-1");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("200 OK") != std::string::npos);
+    assert(resp.find("MESSAGE") != std::string::npos);
+    PASS();
+}
+
 // ================================
 // main
 // ================================
@@ -1666,6 +1957,15 @@ int main()
     test_invite_inserts_default_max_forwards();
     test_bye_decrements_max_forwards();
     test_invite_with_compact_headers();
+
+    std::cout << "\n[Section 11] MESSAGE\n";
+    test_message_to_registered_user();
+    test_message_to_unregistered_user();
+    test_message_to_offline_user();
+    test_message_preserves_body();
+    test_message_in_dialog();
+    test_message_missing_headers();
+    test_options_includes_message_in_allow();
 
     std::cout << "\n=================================\n";
     std::cout << "Results: " << testsPassed << " passed, " << testsFailed << " failed\n";

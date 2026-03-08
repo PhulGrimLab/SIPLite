@@ -829,6 +829,14 @@ private:
                        std::string& outResponse);
 
     // ================================
+    // MESSAGE 처리 (RFC 3428)
+    // ================================
+
+    bool handleMessage(const UdpPacket& pkt,
+                       const SipMessage& msg,
+                       std::string& outResponse);
+
+    // ================================
     // 헬퍼 함수들
     // ================================
     
