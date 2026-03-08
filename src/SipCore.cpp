@@ -408,7 +408,19 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
     if (expiresSec == 0)
     {
         std::lock_guard<std::mutex> lock(regMutex_);
-        regs_.erase(aor);
+        auto it = regs_.find(aor);
+        if (it != regs_.end())
+        {
+            if (it->second.isStatic)
+            {
+                // 정적 등록 단말은 삭제하지 않고 로그인 상태만 해제
+                it->second.loggedIn = false;
+            }
+            else
+            {
+                regs_.erase(it);
+            }
+        }
         outResponse = buildRegisterOk(msg);
         return true;
     }
@@ -420,6 +432,7 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
     reg.port     = pkt.remotePort;
     reg.expiresAt = std::chrono::steady_clock::now() +
                     std::chrono::seconds(expiresSec);
+    reg.loggedIn = true;
 
     {
         std::lock_guard<std::mutex> lock(regMutex_);
@@ -428,6 +441,11 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
         {
             outResponse = buildSimpleResponse(msg, 503, "Service Unavailable");
             return true;
+        }
+        // 기존 정적 등록 단말이면 isStatic 속성 유지
+        if (it != regs_.end() && it->second.isStatic)
+        {
+            reg.isStatic = true;
         }
         regs_[aor] = reg;
     }

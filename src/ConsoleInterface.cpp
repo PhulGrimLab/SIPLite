@@ -293,8 +293,8 @@ void ConsoleInterface::showServerStatus()
         << "실행 중 ✓" << "│\n"
         << "│  등록된 단말 수 : " << std::left << std::setw(38)
         << stats.registrationCount << "│\n"
-        << "│  활성 등록 수   : " << std::left << std::setw(38)
-        << stats.activeRegistrationCount << "│\n"
+        << "│  로그인 단말 수 : " << std::left << std::setw(38)
+        << stats.loggedInCount << "│\n"
         << "│  활성 통화 수   : " << std::left << std::setw(38)
         << stats.activeCallCount << "│\n"
         << "│  현재 시간      : " << std::left << std::setw(38)

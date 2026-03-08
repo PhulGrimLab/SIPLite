@@ -149,6 +149,8 @@ struct Registration
    * */
 
     std::chrono::steady_clock::time_point expiresAt;
+    bool loggedIn = false;  // SIP REGISTER 메시지로 실제 로그인한 단말 여부
+    bool isStatic = false;  // XML 설정으로 사전 등록된 단말 여부 (만료 시 삭제하지 않음)
 };
 
 // ================================
@@ -362,8 +364,17 @@ public:
         {
             if (it->second.expiresAt <= now)
             {
-                it = regs_.erase(it);
-                ++removed;
+                if (it->second.isStatic)
+                {
+                    // 정적 등록 단말은 삭제하지 않고 로그인 상태만 해제
+                    it->second.loggedIn = false;
+                    ++it;
+                }
+                else
+                {
+                    it = regs_.erase(it);
+                    ++removed;
+                }
             }
             else
             {
@@ -505,6 +516,7 @@ public:
     {
         std::size_t registrationCount = 0;          // 전체 등록된 사용자 수
         std::size_t activeRegistrationCount = 0;    // 만료되지 않은 활성 등록 수
+        std::size_t loggedInCount = 0;              // 실제 SIP REGISTER로 로그인한 단말 수
         std::size_t activeCallCount = 0;            // 전체 활성 통화 수
         std::size_t confirmedCallCount = 0;         // ACK 받은 것만 카운트
         std::size_t pendingCallCount = 0;           // 미확립 통화 수
@@ -526,9 +538,10 @@ public:
                 if (reg.expiresAt > now)
                 {
                     ++stats.activeRegistrationCount;
-                    /*
-                    C++ 권고 사항: 반환값을 쓰지 않으면 전위를 사용하는 것이 좋다.
-                    */
+                    if (reg.loggedIn)
+                    {
+                        ++stats.loggedInCount;
+                    }
                 }
             }
         }
@@ -585,6 +598,7 @@ public:
         reg.ip = ip;
         reg.port = port;
         reg.expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(expiresSec);
+        reg.isStatic = true;  // XML 설정으로 등록된 단말
 
         {
             std::lock_guard<std::mutex> lock(regMutex_);
