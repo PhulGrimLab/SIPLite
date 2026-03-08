@@ -438,14 +438,11 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
     SipMessage msg;
     if (!parseSipMessage(pkt.data, msg))
     {
-        // SIP 메시지가 아니면 에코 모드
-        if (sendTo(pkt.remoteIp, pkt.remotePort, pkt.data))
-        {
-            std::lock_guard<std::mutex> lock(g_logMutex);
-            std::cout << "[Worker " << workerId << "] Echo sent to "
-                      << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-        }
-
+        // 파싱 실패: 잘못된 패킷은 보안상 drop (에코 금지)
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        Logger::instance().info("[Worker " + std::to_string(workerId)
+            + "] Malformed SIP message dropped from "
+            + pkt.remoteIp + ":" + std::to_string(pkt.remotePort));
         return;
     }
 

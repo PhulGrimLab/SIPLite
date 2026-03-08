@@ -16,6 +16,10 @@ int main()
         return true;
     });
 
+    // 사전 등록 (XML 설정 대체) — handleRegister는 isStatic 단말만 허용
+    core.registerTerminal("sip:1001@server", "<sip:1001@10.0.0.1:5060>",
+                          "10.0.0.1", 5060, 3600);
+
     // 1) REGISTER
     std::string regRaw =
         "REGISTER sip:server SIP/2.0\r\n"

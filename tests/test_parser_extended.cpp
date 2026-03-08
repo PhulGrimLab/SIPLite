@@ -532,10 +532,10 @@ void test_sips_uri_accepted()
 // 8) 추가 파서 엣지케이스 테스트
 // ================================
 
-void test_content_length_mismatch_still_parses()
+void test_content_length_mismatch_rejected()
 {
-    TEST("Content-Length mismatch still parses");
-    // 파서는 Content-Length와 실제 body 크기 불일치를 검증하지 않음
+    TEST("Content-Length mismatch rejected");
+    // 파서는 Content-Length와 실제 body 크기 불일치 시 파싱 거부 (RFC 3261 §18.3)
     std::string raw =
         "INVITE sip:1000@server SIP/2.0\r\n"
         "Via: SIP/2.0/UDP client:5060\r\n"
@@ -546,8 +546,7 @@ void test_content_length_mismatch_still_parses()
         "Content-Length: 100\r\n\r\n"
         "short body";
     SipMessage msg;
-    assert(parseSipMessage(raw, msg));
-    assert(msg.body == "short body");
+    assert(!parseSipMessage(raw, msg));
     PASS();
 }
 
@@ -646,6 +645,71 @@ void test_header_portion_exceeds_limit()
 }
 
 // ================================
+// Compact header forms (RFC 3261 §7.3.3)
+// ================================
+
+void test_compact_header_via()
+{
+    TEST("Compact header v: → via");
+    std::string raw =
+        "INVITE sip:1001@server SIP/2.0\r\n"
+        "v: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "f: <sip:1002@client>;tag=abc\r\n"
+        "t: <sip:1001@server>\r\n"
+        "i: test-call-id\r\n"
+        "CSeq: 1 INVITE\r\n"
+        "l: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    assert(getHeader(msg, "via").find("SIP/2.0/UDP") != std::string::npos);
+    assert(getHeader(msg, "from").find("1002@client") != std::string::npos);
+    assert(getHeader(msg, "to").find("1001@server") != std::string::npos);
+    assert(getHeader(msg, "call-id") == "test-call-id");
+    assert(getHeader(msg, "content-length") == "0");
+    PASS();
+}
+
+void test_compact_header_contact()
+{
+    TEST("Compact header m: → contact");
+    std::string raw =
+        "REGISTER sip:server SIP/2.0\r\n"
+        "v: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "f: <sip:1001@server>;tag=r1\r\n"
+        "t: <sip:1001@server>\r\n"
+        "i: reg-compact\r\n"
+        "CSeq: 1 REGISTER\r\n"
+        "m: <sip:1001@10.0.0.1:5060>\r\n"
+        "Expires: 3600\r\n"
+        "l: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    assert(getHeader(msg, "contact").find("1001@10.0.0.1") != std::string::npos);
+    PASS();
+}
+
+void test_compact_header_mixed()
+{
+    TEST("Mixed compact and full header names");
+    std::string raw =
+        "INVITE sip:1001@server SIP/2.0\r\n"
+        "v: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "From: <sip:1002@client>;tag=mix\r\n"
+        "t: <sip:1001@server>\r\n"
+        "Call-ID: mix-call\r\n"
+        "CSeq: 1 INVITE\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    // 전체 헤더와 compact 헤더 혼용 시 모두 full name으로 조회 가능
+    assert(!getHeader(msg, "via").empty());
+    assert(!getHeader(msg, "from").empty());
+    assert(!getHeader(msg, "to").empty());
+    assert(getHeader(msg, "call-id") == "mix-call");
+    PASS();
+}
+
+// ================================
 // main
 // ================================
 
@@ -706,13 +770,19 @@ int main()
 
     // 8) 추가 파서 엣지케이스
     std::cout << "\n[Section 8] Additional parser edge cases\n";
-    test_content_length_mismatch_still_parses();
+    test_content_length_mismatch_rejected();
     test_header_with_empty_value();
     test_response_with_empty_reason_phrase();
     test_null_byte_in_request_uri();
     test_crlf_only_message();
     test_max_body_size_rejected();
     test_header_portion_exceeds_limit();
+
+    // 9) Compact header forms
+    std::cout << "\n[Section 9] Compact header forms\n";
+    test_compact_header_via();
+    test_compact_header_contact();
+    test_compact_header_mixed();
 
     std::cout << "\n=================================\n";
     std::cout << "Results: " << testsPassed << " passed, " << testsFailed << " failed\n";

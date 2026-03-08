@@ -140,11 +140,28 @@ int main(int argc, char* argv[])
     console.start();
 
     // 메인 루프: 콘솔 종료 요청 또는 SIGINT 대기
+    // Timer C 및 기타 정리 작업을 주기적으로 수행
+    auto lastCleanup = std::chrono::steady_clock::now();
+    constexpr auto cleanupInterval = std::chrono::seconds(1);
+
     while (!g_terminate.load(std::memory_order_acquire) && 
            !console.isExitRequested()) 
     {
         // 시그널 체크 (시그널 핸들러는 최소 작업만)
         checkSignal();
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastCleanup >= cleanupInterval)
+        {
+            // RFC 3261 §16.7 Timer C: INVITE 타임아웃 확인 (180초)
+            server.sipCore().cleanupTimerC();
+            // 만료된 등록 및 stale 통화/트랜잭션 정리
+            server.sipCore().cleanupExpiredRegistrations();
+            server.sipCore().cleanupStaleCalls();
+            server.sipCore().cleanupStaleTransactions();
+            lastCleanup = now;
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 

@@ -17,10 +17,114 @@ bool SipCore::handlePacket(const UdpPacket& pkt,
         return false;
     }
 
+    // ================================
+    // RFC 3261 §8.1.1 필수 헤더 검증
+    // Via, From, To, Call-ID, CSeq은 모든 SIP 요청에 필수
+    // ================================
+    {
+        std::string via    = getHeader(msg, "via");
+        std::string from   = getHeader(msg, "from");
+        std::string to     = getHeader(msg, "to");
+        std::string callId = getHeader(msg, "call-id");
+        std::string cseq   = getHeader(msg, "cseq");
+
+        if (via.empty() || from.empty() || to.empty() || callId.empty() || cseq.empty())
+        {
+            outResponse = buildSimpleResponse(msg, 400, "Bad Request - Missing Mandatory Header");
+            return true;
+        }
+    }
+
+    // ================================
+    // RFC 3261 §16.3 Max-Forwards 검증
+    // 루프 방지를 위해 Max-Forwards를 확인하고 감소시킴
+    // ================================
+    {
+        std::string maxFwdStr = sanitizeHeaderValue(getHeader(msg, "max-forwards"));
+        if (!maxFwdStr.empty())
+        {
+            std::string trimmed = trim(maxFwdStr);
+            int maxFwd = -1;
+            auto [ptr, ec] = std::from_chars(
+                trimmed.data(), trimmed.data() + trimmed.size(), maxFwd);
+            if (ec != std::errc{} || ptr != trimmed.data() + trimmed.size() || maxFwd < 0)
+            {
+                outResponse = buildSimpleResponse(msg, 400, "Bad Request - Invalid Max-Forwards");
+                return true;
+            }
+            if (maxFwd == 0)
+            {
+                outResponse = buildSimpleResponse(msg, 483, "Too Many Hops");
+                return true;
+            }
+        }
+        // Max-Forwards 헤더 미포함 시에는 RFC 3261 §16.6 step 3에 따라
+        // 프록시가 기본값(70)을 삽입하여 전달하므로 여기서는 차단하지 않음
+    }
+
+    // ================================
+    // Content-Length 검증 (RFC 3261 §18.3)
+    // Content-Length 헤더 값과 실제 body 크기가 불일치하면 400 반환
+    // ================================
+    {
+        std::string clStr = sanitizeHeaderValue(getHeader(msg, "content-length"));
+        if (!clStr.empty())
+        {
+            std::string trimmed = trim(clStr);
+            int contentLen = -1;
+            auto [ptr, ec] = std::from_chars(
+                trimmed.data(), trimmed.data() + trimmed.size(), contentLen);
+            if (ec != std::errc{} || ptr != trimmed.data() + trimmed.size() || contentLen < 0)
+            {
+                outResponse = buildSimpleResponse(msg, 400, "Bad Request - Invalid Content-Length");
+                return true;
+            }
+            if (static_cast<std::size_t>(contentLen) != msg.body.size())
+            {
+                outResponse = buildSimpleResponse(msg, 400, "Bad Request - Content-Length Mismatch");
+                return true;
+            }
+        }
+    }
+
+    // ================================
+    // RFC 3261 §8.2.2.3 Require 헤더 검증
+    // 지원하지 않는 옵션 태그가 포함된 경우 420 Bad Extension 반환
+    // ================================
+    {
+        std::string requireHdr = sanitizeHeaderValue(getHeader(msg, "require"));
+        if (!requireHdr.empty())
+        {
+            // 현재 SIPLite는 어떤 SIP 확장도 지원하지 않으므로
+            // Require 헤더에 포함된 모든 옵션 태그를 Unsupported로 반환
+            std::ostringstream oss;
+            oss << "SIP/2.0 420 Bad Extension\r\n";
+
+            std::string via    = sanitizeHeaderValue(getHeader(msg, "via"));
+            std::string from   = sanitizeHeaderValue(getHeader(msg, "from"));
+            std::string to     = sanitizeHeaderValue(getHeader(msg, "to"));
+            std::string callId = sanitizeHeaderValue(getHeader(msg, "call-id"));
+            std::string cseq   = sanitizeHeaderValue(getHeader(msg, "cseq"));
+
+            if (!via.empty())    oss << "Via: "     << via    << "\r\n";
+            if (!from.empty())   oss << "From: "    << from   << "\r\n";
+            if (!to.empty())     oss << "To: "      << ensureToTag(to) << "\r\n";
+            if (!callId.empty()) oss << "Call-ID: " << callId << "\r\n";
+            if (!cseq.empty())   oss << "CSeq: "    << cseq   << "\r\n";
+
+            oss << "Unsupported: " << requireHdr << "\r\n";
+            oss << "Server: SIPLite/0.1\r\n";
+            oss << "Content-Length: 0\r\n";
+            oss << "\r\n";
+
+            outResponse = oss.str();
+            return true;
+        }
+    }
+
     // SIP 메서드 대소문자 구분 없이 처리 - SIP 표준에서는 메서드 이름이 대소문자 구분 없이 처리되어야 한다.
     // 예: "invite", "INVITE", "InViTe" 모두 같은 메서드로 처리되어야 한다.
     // 따라서 메서드 이름을 대문자로 변환하여 비교한다.
-    // C++17에서는 std::transform과 ::toupper를 사용하여 문자열을 대문자로 변환할 수 있다.
     std::string methodUpper = msg.method;
     std::transform(methodUpper.begin(), methodUpper.end(),
                    methodUpper.begin(), ::toupper);
@@ -178,6 +282,9 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
             it->second.state = TxState::PROCEEDING;
             it->second.lastResponse = pkt.data;
             it->second.attempts = 0;
+            // RFC 3261 §16.7: provisional 응답 수신 시 Timer C 리셋
+            it->second.timerCExpiry = std::chrono::steady_clock::now()
+                + std::chrono::seconds(SipConstants::TIMER_C_SEC);
         }
         else
         {
@@ -353,7 +460,12 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
     {
         std::lock_guard<std::mutex> lock(regMutex_);
         auto it = findByUser_(aor);
-        if (it == regs_.end() || !it->second.isStatic)
+        if (it == regs_.end())
+        {
+            outResponse = buildSimpleResponse(msg, 404, "Not Found");
+            return true;
+        }
+        if (!it->second.isStatic)
         {
             outResponse = buildSimpleResponse(msg, 403, "Forbidden");
             return true;
@@ -484,6 +596,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
 
     Registration regCopy;
     bool found = false;
+    bool knownButOffline = false;  // isStatic이지만 loggedIn=false 또는 expires 만료
 
     {
         std::lock_guard<std::mutex> lock(regMutex_);
@@ -496,12 +609,26 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
                 regCopy = it->second;
                 found = true;
             }
+            else if (it->second.isStatic)
+            {
+                // 사전 등록(XML)된 단말이지만 현재 오프라인
+                knownButOffline = true;
+            }
         }
     }
 
     if (!found)
     {
-        outResponse = buildSimpleResponse(msg, 404, "Not Found");
+        if (knownButOffline)
+        {
+            // RFC 3261 §21.4.18: 등록된 사용자이지만 현재 이용 불가
+            outResponse = buildSimpleResponse(msg, 480, "Temporarily Unavailable");
+        }
+        else
+        {
+            // 완전히 알 수 없는 사용자
+            outResponse = buildSimpleResponse(msg, 404, "Not Found");
+        }
         return true;
     }
 
@@ -581,6 +708,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     std::string contactUri = extractUriFromHeader(regCopy.contact);
     std::string fwdInvite = addProxyVia(pkt.data);
     fwdInvite = addRecordRoute(fwdInvite);  // Record-Route 추가 — in-dialog 요청이 프록시를 경유하도록 보장
+    fwdInvite = decrementMaxForwards(fwdInvite);  // RFC 3261 §16.6 step 3
     if (!contactUri.empty())
     {
         fwdInvite = rewriteRequestUri(fwdInvite, contactUri);
@@ -634,6 +762,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         pi.callerRequest = pkt.data;
         pi.ts = std::chrono::steady_clock::now();
         pi.state = TxState::TRYING;
+        pi.timerCExpiry = pi.ts + std::chrono::seconds(SipConstants::TIMER_C_SEC);
         pi.lastResponse = buildSimpleResponse(msg, 100, "Trying");
 
         pendingInvites_[key] = std::move(pi);
@@ -752,8 +881,9 @@ bool SipCore::handleAck(const UdpPacket& pkt,
     // Send ACK to callee outside all locks
     if (sender_ && !ackFwdIp.empty())
     {
-        // ACK에 프록시 Via 추가 및 자신을 가리키는 Route 헤더 제거 후 전달
+        // ACK에 프록시 Via 추가, Max-Forwards 감소, Route 제거 후 전달
         std::string fwdAck = addProxyVia(pkt.data);
+        fwdAck = decrementMaxForwards(fwdAck);
         fwdAck = stripOwnRoute(fwdAck);
         sender_(ackFwdIp, ackFwdPort, fwdAck);
     }
@@ -788,6 +918,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
 
     bool found = false;
     bool isSecondBye = false;  // cross-BYE (상대편도 BYE 보냄)
+    bool isSameDirRetransmit = false; // 같은 방향 BYE 재전송 (UDP)
     std::string fwdIp;
     uint16_t fwdPort = 0;
     std::string fwdContactUri;  // 상대방의 Contact URI (Request-URI 재작성용)
@@ -821,9 +952,19 @@ bool SipCore::handleBye(const UdpPacket& pkt,
 
             if (dit->second.byeReceived)
             {
-                // 두 번째 BYE (cross-BYE) → Dialog 삭제
-                isSecondBye = true;
-                dialogs_.erase(dit);
+                // 이전 BYE와 같은 발신자인지 확인
+                if (pkt.remoteIp == dit->second.byeSenderIp &&
+                    pkt.remotePort == dit->second.byeSenderPort)
+                {
+                    // 같은 방향 재전송 (UDP 손실 대비) → Dialog/ActiveCall 유지
+                    isSameDirRetransmit = true;
+                }
+                else
+                {
+                    // cross-BYE (상대편도 BYE 보냄) → Dialog 삭제
+                    isSecondBye = true;
+                    dialogs_.erase(dit);
+                }
             }
             else
             {
@@ -854,9 +995,27 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                 }
             }
 
-            if (it->second.byeReceived || isSecondBye)
+            if (isSameDirRetransmit)
             {
-                // 두 번째 BYE → ActiveCall 삭제
+                // 같은 방향 재전송 → ActiveCall 유지 (삭제하지 않음)
+            }
+            else if (it->second.byeReceived)
+            {
+                if (pkt.remoteIp == it->second.byeSenderIp &&
+                    pkt.remotePort == it->second.byeSenderPort)
+                {
+                    // ActiveCall에서도 같은 방향 재전송 감지 → 유지
+                    isSameDirRetransmit = true;
+                }
+                else
+                {
+                    // cross-BYE → ActiveCall 삭제
+                    activeCalls_.erase(it);
+                }
+            }
+            else if (isSecondBye)
+            {
+                // Dialog에서 cross-BYE 감지됨 → ActiveCall 삭제
                 activeCalls_.erase(it);
             }
             else
@@ -890,8 +1049,9 @@ bool SipCore::handleBye(const UdpPacket& pkt,
         // BYE를 상대방에게 전달 (B2BUA/프록시 동작)
         if (sender_ && !fwdIp.empty())
         {
-            // BYE에 프록시 Via 추가 및 자신을 가리키는 Route 헤더 제거 후 전달
+            // BYE에 프록시 Via 추가, Max-Forwards 감소, Route 제거 후 전달
             std::string fwdBye = addProxyVia(pkt.data);
+            fwdBye = decrementMaxForwards(fwdBye);
             fwdBye = stripOwnRoute(fwdBye);
 
             // RFC 3261 §16.6: Request-URI를 상대방의 Contact URI로 재작성
@@ -939,12 +1099,11 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
         return true;
     }
 
-    outResponse = buildSimpleResponse(msg, 200, "OK");
-
     int cseqNum = parseCSeqNum(cseqHdr);
     if (cseqNum < 0)
     {
-        return true; // 200 OK already set, but can't process further
+        outResponse = buildSimpleResponse(msg, 400, "Bad Request");
+        return true;
     }
 
     std::string key = callId + ":" + std::to_string(cseqNum);
@@ -963,25 +1122,41 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
         auto pit = pendingInvites_.find(key);
         if (pit != pendingInvites_.end())
         {
-            foundPending = true;
+            // RFC 3261 §9.2: 매칭 트랜잭션 존재 → 200 OK
+            outResponse = buildSimpleResponse(msg, 200, "OK");
 
-            // PendingInvite에서 callee 정보 가져오기
-            calleeIp = pit->second.calleeIp;
-            calleePort = pit->second.calleePort;
+            if (pit->second.state == TxState::COMPLETED)
+            {
+                // RFC 3261 §9.2: 이미 최종 응답을 받은 트랜잭션 — CANCEL 효과 없음
+                // 200 OK 응답만 하고 CANCEL을 callee에게 전달하지 않음
+                Logger::instance().info("[handleCancel] INVITE already COMPLETED, "
+                    "CANCEL has no effect: key=" + key);
+            }
+            else
+            {
+                foundPending = true;
 
-            // callee에게 전달할 CANCEL 생성
-            cancelRaw = buildCancelForPending(pit->second);
+                // PendingInvite에서 callee 정보 가져오기
+                calleeIp = pit->second.calleeIp;
+                calleePort = pit->second.calleePort;
 
-            // pendingInvite를 삭제하지 않음 — callee의 487 응답이 handleResponse를 통해
-            // 정상적으로 처리되도록 함 (caller에게 487 전달 + callee에게 ACK)
-            // RFC 3261 §16.10: 프록시는 CANCEL을 전달하고, callee의 응답을 그대로 caller에게 전달해야 함
+                // callee에게 전달할 CANCEL 생성
+                cancelRaw = buildCancelForPending(pit->second);
+
+                // pendingInvite를 삭제하지 않음 — callee의 487 응답이 handleResponse를 통해
+                // 정상적으로 처리되도록 함 (caller에게 487 전달 + callee에게 ACK)
+                // RFC 3261 §16.10: 프록시는 CANCEL을 전달하고, callee의 응답을 그대로 caller에게 전달해야 함
+            }
         }
         else
         {
-            // PendingInvite가 아직 없음 — INVITE보다 CANCEL이 먼저 처리된 경합 상황
+            // RFC 3261 §9.2: 매칭 트랜잭션 없음 → 481
+            outResponse = buildSimpleResponse(msg, 481, "Call/Transaction Does Not Exist");
+
+            // UDP 재정렬로 INVITE보다 CANCEL이 먼저 도착할 수 있으므로
             // 보류 CANCEL 목록에 등록하여, INVITE가 PendingInvite를 생성할 때 즉시 취소 처리하도록 함
             pendingCancels_.insert(key);
-            Logger::instance().info("[handleCancel] PendingInvite not yet created, deferring cancel: key=" + key);
+            Logger::instance().info("[handleCancel] No matching transaction: key=" + key);
 
             // 미확립 ActiveCall이 이미 존재하면 정리
             auto acIt = activeCalls_.find(callId);
@@ -1163,6 +1338,56 @@ std::string SipCore::rewriteRequestUri(const std::string& rawMsg, const std::str
     result.reserve(newRequestLine.size() + 2 + rawMsg.size() - lineEnd);
     result.append(newRequestLine);
     result.append(rawMsg, lineEnd);  // CRLF + 나머지 헤더 + 바디
+    return result;
+}
+
+// Max-Forwards 감소 (RFC 3261 §16.6 step 3)
+// 프록시가 요청을 전달할 때 Max-Forwards 값을 1 감소시킨다.
+// 헤더가 없으면 Max-Forwards: 70을 삽입한다.
+std::string SipCore::decrementMaxForwards(const std::string& rawMsg) const
+{
+    // 헤더 영역에서 Max-Forwards 탐색 (대소문자 무시)
+    std::string lower = rawMsg;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+    std::string needle = "\r\nmax-forwards:";
+    auto pos = lower.find(needle);
+    if (pos != std::string::npos)
+    {
+        // 값 시작 위치
+        size_t valStart = pos + needle.size();
+        // 공백 건너뛰기
+        while (valStart < rawMsg.size() && rawMsg[valStart] == ' ') ++valStart;
+        // 값 끝 위치
+        size_t valEnd = valStart;
+        while (valEnd < rawMsg.size() && rawMsg[valEnd] >= '0' && rawMsg[valEnd] <= '9') ++valEnd;
+
+        if (valEnd > valStart)
+        {
+            int val = 0;
+            auto [ptr, ec] = std::from_chars(rawMsg.data() + valStart, rawMsg.data() + valEnd, val);
+            if (ec == std::errc())
+            {
+                int newVal = (val > 0) ? val - 1 : 0;
+                std::string result;
+                result.reserve(rawMsg.size() + 4);
+                result.append(rawMsg, 0, valStart);
+                result.append(std::to_string(newVal));
+                result.append(rawMsg, valEnd);
+                return result;
+            }
+        }
+    }
+
+    // Max-Forwards 헤더 없음 → 기본값 70 삽입 (request-line 직후)
+    auto crlfPos = rawMsg.find("\r\n");
+    if (crlfPos == std::string::npos) return rawMsg;
+
+    std::string result;
+    result.reserve(rawMsg.size() + 24);
+    result.append(rawMsg, 0, crlfPos + 2);
+    result.append("Max-Forwards: 70\r\n");
+    result.append(rawMsg, crlfPos + 2);
     return result;
 }
 

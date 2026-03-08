@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UdpPacket.h"
+#include "Logger.h"
 
 #include <string>
 #include <map>
@@ -32,6 +33,7 @@ namespace SipConstants
     constexpr int DEFAULT_EXPIRES_SEC = 3600;              // 기본 등록 유효 시간 (1시간)
     constexpr std::size_t MAX_REGISTRATIONS = 10000;       // 최대 등록 개수
     constexpr std::size_t MAX_ACTIVE_CALLS = 5000;         // 최대 활성 통화 개수
+    constexpr int TIMER_C_SEC = 180;                       // RFC 3261 §16.7 Timer C (3분)
 }
 
 // ================================
@@ -514,6 +516,110 @@ public:
         return removed;
     }
 
+    // ================================
+    // Timer C 만료 처리 (RFC 3261 §16.7)
+    // INVITE 전달 후 180초 이내에 최종 응답을 수신하지 못하면
+    // caller에게 408 Request Timeout을 보내고 callee에게 CANCEL을 전달한다.
+    // 주기적으로 호출해야 함 (예: 메인 루프에서 1초 간격)
+    // ================================
+    std::size_t cleanupTimerC()
+    {
+        auto now = std::chrono::steady_clock::now();
+
+        // 락 내에서 타임아웃 항목을 수집하고, 락 밖에서 네트워크 전송
+        struct TimerCEntry {
+            std::string key;
+            std::string callerIp;
+            uint16_t callerPort;
+            std::string calleeIp;
+            uint16_t calleePort;
+            std::string resp408;      // caller에게 보낼 408
+            std::string cancelMsg;    // callee에게 보낼 CANCEL
+            std::string callId;
+        };
+        std::vector<TimerCEntry> expired;
+
+        {
+            std::lock_guard<std::mutex> lockCall(callMutex_);
+            std::lock_guard<std::mutex> lockPend(pendingInvMutex_);
+            std::lock_guard<std::mutex> lockDlg(dlgMutex_);
+
+            for (auto it = pendingInvites_.begin(); it != pendingInvites_.end(); )
+            {
+                // COMPLETED 상태는 이미 최종 응답을 받은 것이므로 Timer C 대상이 아님
+                if (it->second.state == TxState::COMPLETED)
+                {
+                    ++it;
+                    continue;
+                }
+
+                if (it->second.timerCExpiry <= now)
+                {
+                    TimerCEntry entry;
+                    entry.key = it->first;
+                    entry.callerIp = it->second.callerIp;
+                    entry.callerPort = it->second.callerPort;
+                    entry.calleeIp = it->second.calleeIp;
+                    entry.calleePort = it->second.calleePort;
+
+                    // caller에게 보낼 408 — callerRequest(프록시 Via 없는 원본)로 생성
+                    if (!it->second.callerRequest.empty())
+                    {
+                        SipMessage reqMsg;
+                        if (parseSipMessage(it->second.callerRequest, reqMsg))
+                        {
+                            entry.resp408 = buildSimpleResponse(reqMsg, 408, "Request Timeout");
+                        }
+                    }
+
+                    // callee에게 보낼 CANCEL
+                    entry.cancelMsg = buildCancelForPending(it->second);
+
+                    // callId 추출
+                    auto colonPos = entry.key.find(':');
+                    if (colonPos != std::string::npos)
+                        entry.callId = entry.key.substr(0, colonPos);
+
+                    expired.push_back(std::move(entry));
+
+                    // 자료구조 정리
+                    if (!expired.back().callId.empty())
+                    {
+                        auto acIt = activeCalls_.find(expired.back().callId);
+                        if (acIt != activeCalls_.end() && !acIt->second.confirmed)
+                        {
+                            activeCalls_.erase(acIt);
+                        }
+                        dialogs_.erase(expired.back().callId);
+                    }
+
+                    it = pendingInvites_.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        } // 락 해제
+
+        // 락 밖에서 네트워크 전송
+        for (const auto& e : expired)
+        {
+            if (sender_)
+            {
+                if (!e.resp408.empty())
+                    sender_(e.callerIp, e.callerPort, e.resp408);
+                if (!e.cancelMsg.empty())
+                    sender_(e.calleeIp, e.calleePort, e.cancelMsg);
+            }
+            Logger::instance().info("[Timer C] INVITE timeout: key=" + e.key
+                + " → 408 to caller " + e.callerIp + ":" + std::to_string(e.callerPort)
+                + ", CANCEL to callee " + e.calleeIp + ":" + std::to_string(e.calleePort));
+        }
+
+        return expired.size();
+    }
+
     // 등록된 사용자 수 조회
     std::size_t registrationCount() const
     {
@@ -730,6 +836,10 @@ private:
     
     std::string generateTag() const;
 
+    // Max-Forwards 감소 (RFC 3261 §16.6 step 3)
+    // 프록시가 요청을 전달할 때 Max-Forwards를 1 감소시키거나, 없으면 70으로 삽입
+    std::string decrementMaxForwards(const std::string& rawMsg) const;
+
     // 프록시 Via 헤더 관리 (RFC 3261 §16.6/§16.7)
     std::string addProxyVia(const std::string& rawMsg) const;
     std::string removeTopVia(const std::string& rawMsg) const;
@@ -803,6 +913,7 @@ private:
         int attempts = 0;              // retransmission attempts observed
         std::chrono::steady_clock::time_point ts;     // creation time
         std::chrono::steady_clock::time_point expiry; // when COMPLETED entry may be removed
+        std::chrono::steady_clock::time_point timerCExpiry; // RFC 3261 §16.7 Timer C
     };
 
     mutable std::mutex pendingInvMutex_;

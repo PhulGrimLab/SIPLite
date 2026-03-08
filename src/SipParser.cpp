@@ -148,6 +148,25 @@ bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
             std::string name  = toLower(trim(line.substr(0, colon)));
             std::string value = trim(line.substr(colon + 1));
 
+            // RFC 3261 §7.3.3: Compact header name expansion
+            if (name.size() == 1)
+            {
+                switch (name[0])
+                {
+                    case 'v': name = "via"; break;
+                    case 'f': name = "from"; break;
+                    case 't': name = "to"; break;
+                    case 'i': name = "call-id"; break;
+                    case 'm': name = "contact"; break;
+                    case 'l': name = "content-length"; break;
+                    case 'e': name = "content-encoding"; break;
+                    case 's': name = "subject"; break;
+                    case 'k': name = "supported"; break;
+                    case 'c': name = "content-type"; break;
+                    default: break;  // unknown single-letter → keep as-is
+                }
+            }
+
             lastHeaderName = name;
 
             // 동일 이름 헤더가 이미 존재하면 콤마로 결합 (RFC 3261 Section 7.3.1)
@@ -165,6 +184,23 @@ bool parseSipMessage(const std::string& raw, SipMessage& out) noexcept
 
         // 바디
         out.body = bodyPart;
+
+        // Content-Length 검증: 헤더 값과 실제 바디 크기 불일치 시 파싱 실패
+        auto clIt = out.headers.find("content-length");
+        if (clIt != out.headers.end())
+        {
+            std::string clVal = trim(clIt->second);
+            int declaredLen = -1;
+            auto [ptr, ec] = std::from_chars(
+                clVal.data(), clVal.data() + clVal.size(), declaredLen);
+            if (ec == std::errc{} && ptr == clVal.data() + clVal.size() && declaredLen >= 0)
+            {
+                if (static_cast<std::size_t>(declaredLen) != bodyPart.size())
+                {
+                    return false; // Content-Length 불일치
+                }
+            }
+        }
 
         return true;
     }
