@@ -34,6 +34,9 @@ namespace SipConstants
     constexpr std::size_t MAX_REGISTRATIONS = 10000;       // 최대 등록 개수
     constexpr std::size_t MAX_ACTIVE_CALLS = 5000;         // 최대 활성 통화 개수
     constexpr int TIMER_C_SEC = 180;                       // RFC 3261 §16.7 Timer C (3분)
+    constexpr std::size_t MAX_SUBSCRIPTIONS = 10000;       // 최대 구독 개수
+    constexpr int DEFAULT_SUB_EXPIRES_SEC = 3600;           // 기본 구독 유효 시간 (1시간)
+    constexpr int MAX_SUB_EXPIRES_SEC = 7200;               // 최대 구독 유효 시간 (2시간)
 }
 
 // ================================
@@ -635,6 +638,143 @@ public:
     }
 
     // ================================
+    // Subscription 구조체 (RFC 6665)
+    // ================================
+    struct Subscription
+    {
+        std::string subscriberAor;  // 구독자 AoR (From URI)
+        std::string targetAor;      // 구독 대상 AoR (To URI / Request-URI)
+        std::string event;          // Event 패키지 ("presence", "dialog", "message-summary" 등)
+        std::string callId;         // SUBSCRIBE의 Call-ID (dialog 식별)
+        std::string fromTag;        // SUBSCRIBE의 From tag
+        std::string toTag;          // 서버가 생성한 To tag
+        std::string subscriberIp;   // 구독자 IP
+        uint16_t subscriberPort = 0;
+        std::string contact;        // 구독자 Contact URI
+        int cseq = 0;               // 마지막 CSeq 번호 (NOTIFY 전송용)
+        std::chrono::steady_clock::time_point expiresAt;
+        enum class State { ACTIVE, PENDING, TERMINATED } state = State::PENDING;
+    };
+
+    // 활성 구독 수 조회
+    std::size_t subscriptionCount() const
+    {
+        std::lock_guard<std::mutex> lock(subMutex_);
+        return subscriptions_.size();
+    }
+
+    // ================================
+    // 만료된 구독 정리 + NOTIFY(terminated) 발송
+    // 주기적 호출 필요 (예: 메인 루프에서 1초 간격)
+    // ================================
+    std::size_t cleanupExpiredSubscriptions()
+    {
+        auto now = std::chrono::steady_clock::now();
+
+        // 락 내에서 만료 항목 수집, 락 밖에서 네트워크 전송
+        struct ExpiredSub {
+            std::string key;
+            std::string subscriberIp;
+            uint16_t subscriberPort;
+            std::string notifyMsg;
+        };
+        std::vector<ExpiredSub> expired;
+
+        {
+            std::lock_guard<std::mutex> lock(subMutex_);
+            for (auto it = subscriptions_.begin(); it != subscriptions_.end(); )
+            {
+                if (it->second.expiresAt <= now &&
+                    it->second.state != Subscription::State::TERMINATED)
+                {
+                    ExpiredSub entry;
+                    entry.key = it->first;
+                    entry.subscriberIp = it->second.subscriberIp;
+                    entry.subscriberPort = it->second.subscriberPort;
+                    entry.notifyMsg = buildNotifyUnlocked_(it->first, "terminated;reason=timeout");
+                    expired.push_back(std::move(entry));
+
+                    it = subscriptions_.erase(it);
+                }
+                else if (it->second.state == Subscription::State::TERMINATED)
+                {
+                    it = subscriptions_.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        }
+
+        for (const auto& e : expired)
+        {
+            if (sender_)
+            {
+                sender_(e.subscriberIp, e.subscriberPort, e.notifyMsg);
+            }
+            Logger::instance().info("[Subscription] Expired: key=" + e.key);
+        }
+
+        return expired.size();
+    }
+
+    // 특정 AoR을 구독 중인 구독자 목록 조회
+    std::vector<Subscription> getSubscriptionsForTarget(const std::string& targetAor) const
+    {
+        std::vector<Subscription> result;
+        std::lock_guard<std::mutex> lock(subMutex_);
+        auto now = std::chrono::steady_clock::now();
+        for (const auto& [key, sub] : subscriptions_)
+        {
+            if (extractUserFromUri(sub.targetAor) == extractUserFromUri(targetAor)
+                && sub.state != Subscription::State::TERMINATED
+                && sub.expiresAt > now)
+            {
+                result.push_back(sub);
+            }
+        }
+        return result;
+    }
+
+    // 등록 상태 변경 시 구독자에게 NOTIFY 발송 (예: REGISTER 후 호출)
+    void notifySubscribers(const std::string& aor, const std::string& body,
+                           const std::string& contentType)
+    {
+        std::vector<std::pair<std::string, std::string>> toSend; // {ip:port, notify}
+        std::string user = extractUserFromUri(aor);
+
+        {
+            std::lock_guard<std::mutex> lock(subMutex_);
+            auto now = std::chrono::steady_clock::now();
+            for (auto& [key, sub] : subscriptions_)
+            {
+                if (extractUserFromUri(sub.targetAor) == user
+                    && sub.state == Subscription::State::ACTIVE
+                    && sub.expiresAt > now)
+                {
+                    std::string notify = buildNotifyUnlocked_(key, "active", body, contentType);
+                    toSend.emplace_back(
+                        sub.subscriberIp + ":" + std::to_string(sub.subscriberPort),
+                        std::move(notify));
+                }
+            }
+        }
+
+        if (sender_)
+        {
+            for (const auto& [addr, notify] : toSend)
+            {
+                auto colonPos = addr.find(':');
+                std::string ip = addr.substr(0, colonPos);
+                uint16_t port = static_cast<uint16_t>(
+                    std::stoi(addr.substr(colonPos + 1)));
+                sender_(ip, port, notify);
+            }
+        }
+    }
+
+    // ================================
     // 통계 정보 구조체 (한 번에 조회)
     // ================================
 
@@ -837,6 +977,28 @@ private:
                        std::string& outResponse);
 
     // ================================
+    // SUBSCRIBE 처리 (RFC 6665)
+    // ================================
+
+    bool handleSubscribe(const UdpPacket& pkt,
+                         const SipMessage& msg,
+                         std::string& outResponse);
+
+    // ================================
+    // NOTIFY 처리 (RFC 6665)
+    // ================================
+
+    bool handleNotify(const UdpPacket& pkt,
+                      const SipMessage& msg,
+                      std::string& outResponse);
+
+    // NOTIFY 빌더 (구독자에게 상태 통지 전송)
+    std::string buildNotify(const std::string& subKey,
+                            const std::string& subState,
+                            const std::string& body = "",
+                            const std::string& contentType = "") const;
+
+    // ================================
     // 헬퍼 함수들
     // ================================
     
@@ -935,6 +1097,20 @@ private:
     // Dialog storage
     mutable std::mutex dlgMutex_;
     std::unordered_map<std::string, Dialog> dialogs_;
+
+    // ================================
+    // Subscription storage (RFC 6665)
+    // ================================
+    // key = callId
+
+    mutable std::mutex subMutex_;
+    std::unordered_map<std::string, Subscription> subscriptions_;  // key = callId
+
+    // subMutex_ 이미 보유한 상태에서 호출 (deadlock 방지)
+    std::string buildNotifyUnlocked_(const std::string& subKey,
+                                      const std::string& subState,
+                                      const std::string& body = "",
+                                      const std::string& contentType = "") const;
 
     // Sender callback (set by UdpServer)
     SenderFn sender_;

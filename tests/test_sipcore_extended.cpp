@@ -1886,6 +1886,631 @@ void test_options_includes_message_in_allow()
     PASS();
 }
 
+// Helper: SUBSCRIBE 요청 생성
+static std::string makeSubscribe(const std::string& toUri,
+                                  const std::string& fromUri,
+                                  const std::string& callId,
+                                  int cseq,
+                                  const std::string& event,
+                                  const std::string& expires = "3600",
+                                  const std::string& fromTag = "sub-tag",
+                                  const std::string& contact = "")
+{
+    std::string raw =
+        "SUBSCRIBE " + toUri + " SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP subscriber:5060\r\n"
+        "From: <" + fromUri + ">;tag=" + fromTag + "\r\n"
+        "To: <" + toUri + ">\r\n"
+        "Call-ID: " + callId + "\r\n"
+        "CSeq: " + std::to_string(cseq) + " SUBSCRIBE\r\n"
+        "Event: " + event + "\r\n"
+        "Expires: " + expires + "\r\n";
+    if (!contact.empty())
+    {
+        raw += "Contact: " + contact + "\r\n";
+    }
+    raw += "Content-Length: 0\r\n\r\n";
+    return raw;
+}
+
+// ================================
+// 41) SUBSCRIBE presence → 200 OK + initial NOTIFY
+// ================================
+
+void test_subscribe_presence()
+{
+    TEST("SUBSCRIBE presence → 200 OK + initial NOTIFY");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                     "sub-call-1", 1, "presence", "3600", "sub1");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    // 200 OK 응답 확인
+    assert(resp.find("200 OK") != std::string::npos);
+    assert(resp.find("Expires: 3600") != std::string::npos);
+
+    // initial NOTIFY 전송 확인
+    bool notifySent = false;
+    for (const auto& m : sent) {
+        if (m.data.find("NOTIFY") != std::string::npos) {
+            assert(m.data.find("Event: presence") != std::string::npos);
+            assert(m.data.find("Subscription-State: active") != std::string::npos);
+            notifySent = true;
+        }
+    }
+    assert(notifySent);
+
+    // 구독 수 확인
+    assert(core->subscriptionCount() == 1);
+    PASS();
+}
+
+// ================================
+// 42) SUBSCRIBE without Event → 489 Bad Event
+// ================================
+
+void test_subscribe_missing_event()
+{
+    TEST("SUBSCRIBE without Event header → 489 Bad Event");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw =
+        "SUBSCRIBE sip:1001@server SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP subscriber:5060\r\n"
+        "From: <sip:1002@client>;tag=sub2\r\n"
+        "To: <sip:1001@server>\r\n"
+        "Call-ID: sub-no-event\r\n"
+        "CSeq: 1 SUBSCRIBE\r\n"
+        "Expires: 3600\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("489 Bad Event") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 43) SUBSCRIBE unsupported event → 489 Bad Event
+// ================================
+
+void test_subscribe_unsupported_event()
+{
+    TEST("SUBSCRIBE unsupported event → 489 Bad Event");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                     "sub-unsup", 1, "refer");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("489 Bad Event") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 44) SUBSCRIBE Expires: 0 → 구독 해지 + NOTIFY(terminated)
+// ================================
+
+void test_subscribe_unsubscribe()
+{
+    TEST("SUBSCRIBE Expires: 0 → unsubscribe + NOTIFY terminated");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // 먼저 구독 생성
+    std::string raw1 = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                      "sub-unsub", 1, "presence", "3600", "unsub-tag");
+    SipMessage msg1;
+    assert(parseSipMessage(raw1, msg1));
+    UdpPacket pkt1{"10.0.0.2", 5060, raw1};
+    std::string resp1;
+    core->handlePacket(pkt1, msg1, resp1);
+    assert(core->subscriptionCount() == 1);
+    sent.clear();
+
+    // Expires: 0으로 해지
+    std::string raw2 = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                      "sub-unsub", 2, "presence", "0", "unsub-tag");
+    SipMessage msg2;
+    assert(parseSipMessage(raw2, msg2));
+    UdpPacket pkt2{"10.0.0.2", 5060, raw2};
+    std::string resp2;
+    core->handlePacket(pkt2, msg2, resp2);
+
+    // 200 OK with Expires: 0
+    assert(resp2.find("200 OK") != std::string::npos);
+    assert(resp2.find("Expires: 0") != std::string::npos);
+
+    // NOTIFY(terminated) 전송 확인
+    bool terminatedSent = false;
+    for (const auto& m : sent) {
+        if (m.data.find("NOTIFY") != std::string::npos
+            && m.data.find("terminated") != std::string::npos) {
+            terminatedSent = true;
+        }
+    }
+    assert(terminatedSent);
+
+    // 구독 제거 확인
+    assert(core->subscriptionCount() == 0);
+    PASS();
+}
+
+// ================================
+// 45) SUBSCRIBE refresh → 기존 구독 만료 시간 갱신
+// ================================
+
+void test_subscribe_refresh()
+{
+    TEST("SUBSCRIBE refresh updates expiry");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // 초기 구독
+    std::string raw1 = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                      "sub-refresh", 1, "presence", "600", "ref-tag");
+    SipMessage msg1;
+    assert(parseSipMessage(raw1, msg1));
+    UdpPacket pkt1{"10.0.0.2", 5060, raw1};
+    std::string resp1;
+    core->handlePacket(pkt1, msg1, resp1);
+    assert(core->subscriptionCount() == 1);
+
+    // 갱신 (같은 callId, 새 CSeq)
+    std::string raw2 = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                      "sub-refresh", 2, "presence", "1800", "ref-tag");
+    SipMessage msg2;
+    assert(parseSipMessage(raw2, msg2));
+    UdpPacket pkt2{"10.0.0.2", 5060, raw2};
+    std::string resp2;
+    core->handlePacket(pkt2, msg2, resp2);
+
+    // 여전히 1개 구독
+    assert(core->subscriptionCount() == 1);
+    // 200 OK + 갱신된 Expires
+    assert(resp2.find("200 OK") != std::string::npos);
+    assert(resp2.find("Expires: 1800") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 46) SUBSCRIBE dialog event → 200 OK
+// ================================
+
+void test_subscribe_dialog_event()
+{
+    TEST("SUBSCRIBE dialog event → 200 OK");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                     "sub-dialog", 1, "dialog");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("200 OK") != std::string::npos);
+    assert(core->subscriptionCount() == 1);
+    PASS();
+}
+
+// ================================
+// 47) SUBSCRIBE message-summary event → 200 OK
+// ================================
+
+void test_subscribe_message_summary_event()
+{
+    TEST("SUBSCRIBE message-summary event → 200 OK");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                     "sub-mwi", 1, "message-summary");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("200 OK") != std::string::npos);
+    assert(core->subscriptionCount() == 1);
+    PASS();
+}
+
+// ================================
+// 48) SUBSCRIBE missing headers → 400 Bad Request
+// ================================
+
+void test_subscribe_missing_headers()
+{
+    TEST("SUBSCRIBE missing To → 400 Bad Request");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw =
+        "SUBSCRIBE sip:1001@server SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP subscriber:5060\r\n"
+        "From: <sip:1002@client>;tag=bad-sub\r\n"
+        "Call-ID: sub-bad\r\n"
+        "CSeq: 1 SUBSCRIBE\r\n"
+        "Event: presence\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("400 Bad Request") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 49) SUBSCRIBE invalid Expires → 400 Bad Request
+// ================================
+
+void test_subscribe_invalid_expires()
+{
+    TEST("SUBSCRIBE invalid Expires → 400 Bad Request");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                     "sub-badexp", 1, "presence", "notanumber");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("400 Bad Request") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 50) SUBSCRIBE Expires clamped to max
+// ================================
+
+void test_subscribe_expires_clamped()
+{
+    TEST("SUBSCRIBE Expires clamped to MAX_SUB_EXPIRES_SEC");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                     "sub-clamp", 1, "presence", "99999");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("200 OK") != std::string::npos);
+    // Expires가 7200으로 클램핑
+    assert(resp.find("Expires: 7200") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 51) NOTIFY with existing subscription → 200 OK
+// ================================
+
+void test_notify_with_subscription()
+{
+    TEST("NOTIFY with existing subscription → 200 OK");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // 먼저 구독 생성
+    std::string subRaw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                        "notify-call", 1, "presence", "3600", "n-tag");
+    SipMessage subMsg;
+    assert(parseSipMessage(subRaw, subMsg));
+    UdpPacket subPkt{"10.0.0.2", 5060, subRaw};
+    std::string subResp;
+    core->handlePacket(subPkt, subMsg, subResp);
+    assert(core->subscriptionCount() == 1);
+    sent.clear();
+
+    // notifier(10.0.0.1)에서 NOTIFY 전송
+    std::string notifyRaw =
+        "NOTIFY sip:1002@client SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "From: <sip:1001@server>;tag=server-tag\r\n"
+        "To: <sip:1002@client>;tag=n-tag\r\n"
+        "Call-ID: notify-call\r\n"
+        "CSeq: 2 NOTIFY\r\n"
+        "Event: presence\r\n"
+        "Subscription-State: active\r\n"
+        "Content-Type: application/pidf+xml\r\n"
+        "Content-Length: 5\r\n\r\n"
+        "open\n";
+    SipMessage notifyMsg;
+    assert(parseSipMessage(notifyRaw, notifyMsg));
+    UdpPacket notifyPkt{"10.0.0.1", 5060, notifyRaw};
+    std::string notifyResp;
+    core->handlePacket(notifyPkt, notifyMsg, notifyResp);
+
+    assert(notifyResp.find("200 OK") != std::string::npos);
+
+    // subscriber(10.0.0.2)에게 NOTIFY 전달됨
+    bool fwdToSubscriber = false;
+    for (const auto& m : sent) {
+        if (m.data.find("NOTIFY") != std::string::npos && m.ip == "10.0.0.2") {
+            fwdToSubscriber = true;
+        }
+    }
+    assert(fwdToSubscriber);
+    PASS();
+}
+
+// ================================
+// 52) NOTIFY without subscription → 481
+// ================================
+
+void test_notify_no_subscription()
+{
+    TEST("NOTIFY without subscription → 481");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw =
+        "NOTIFY sip:1002@client SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "From: <sip:1001@server>;tag=t1\r\n"
+        "To: <sip:1002@client>;tag=t2\r\n"
+        "Call-ID: no-sub-notify\r\n"
+        "CSeq: 1 NOTIFY\r\n"
+        "Event: presence\r\n"
+        "Subscription-State: active\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.1", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("481") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 53) NOTIFY missing Event → 489 Bad Event
+// ================================
+
+void test_notify_missing_event()
+{
+    TEST("NOTIFY missing Event → 489 Bad Event");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw =
+        "NOTIFY sip:1002@client SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "From: <sip:1001@server>;tag=t1\r\n"
+        "To: <sip:1002@client>;tag=t2\r\n"
+        "Call-ID: notify-no-event\r\n"
+        "CSeq: 1 NOTIFY\r\n"
+        "Subscription-State: active\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.1", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("489 Bad Event") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 54) NOTIFY missing Subscription-State → 400
+// ================================
+
+void test_notify_missing_subscription_state()
+{
+    TEST("NOTIFY missing Subscription-State → 400");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // 구독 생성
+    std::string subRaw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                        "notify-nostate", 1, "presence");
+    SipMessage subMsg;
+    assert(parseSipMessage(subRaw, subMsg));
+    UdpPacket subPkt{"10.0.0.2", 5060, subRaw};
+    std::string subResp;
+    core->handlePacket(subPkt, subMsg, subResp);
+
+    std::string raw =
+        "NOTIFY sip:1002@client SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "From: <sip:1001@server>;tag=t1\r\n"
+        "To: <sip:1002@client>;tag=t2\r\n"
+        "Call-ID: notify-nostate\r\n"
+        "CSeq: 2 NOTIFY\r\n"
+        "Event: presence\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.1", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("400 Bad Request") != std::string::npos);
+    PASS();
+}
+
+// ================================
+// 55) NOTIFY terminated → 구독 제거
+// ================================
+
+void test_notify_terminated_removes_subscription()
+{
+    TEST("NOTIFY terminated → removes subscription");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // 구독 생성
+    std::string subRaw = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                        "notify-term", 1, "presence", "3600", "nt-tag");
+    SipMessage subMsg;
+    assert(parseSipMessage(subRaw, subMsg));
+    UdpPacket subPkt{"10.0.0.2", 5060, subRaw};
+    std::string subResp;
+    core->handlePacket(subPkt, subMsg, subResp);
+    assert(core->subscriptionCount() == 1);
+
+    // NOTIFY terminated 수신
+    std::string raw =
+        "NOTIFY sip:1002@client SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP 10.0.0.1:5060\r\n"
+        "From: <sip:1001@server>;tag=server-tag\r\n"
+        "To: <sip:1002@client>;tag=nt-tag\r\n"
+        "Call-ID: notify-term\r\n"
+        "CSeq: 2 NOTIFY\r\n"
+        "Event: presence\r\n"
+        "Subscription-State: terminated;reason=timeout\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.1", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("200 OK") != std::string::npos);
+    assert(core->subscriptionCount() == 0);
+    PASS();
+}
+
+// ================================
+// 56) notifySubscribers → 구독자들에게 NOTIFY 전달
+// ================================
+
+void test_notify_subscribers()
+{
+    TEST("notifySubscribers sends NOTIFY to all subscribers");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // 2명의 구독자 등록
+    std::string sub1 = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                      "nsub-1", 1, "presence", "3600", "ns1");
+    SipMessage msg1;
+    assert(parseSipMessage(sub1, msg1));
+    UdpPacket pkt1{"10.0.0.2", 5060, sub1};
+    std::string resp1;
+    core->handlePacket(pkt1, msg1, resp1);
+
+    std::string sub2 = makeSubscribe("sip:1001@server", "sip:1003@client",
+                                      "nsub-2", 1, "presence", "3600", "ns2");
+    SipMessage msg2;
+    assert(parseSipMessage(sub2, msg2));
+    UdpPacket pkt2{"10.0.0.3", 5060, sub2};
+    std::string resp2;
+    core->handlePacket(pkt2, msg2, resp2);
+
+    assert(core->subscriptionCount() == 2);
+    sent.clear();
+
+    // 상태 변경 알림
+    core->notifySubscribers("sip:1001@server",
+                            "<?xml version='1.0'?><presence/>",
+                            "application/pidf+xml");
+
+    // 2개의 NOTIFY가 전송되어야 함
+    int notifyCount = 0;
+    for (const auto& m : sent) {
+        if (m.data.find("NOTIFY") != std::string::npos) {
+            assert(m.data.find("presence") != std::string::npos);
+            assert(m.data.find("application/pidf+xml") != std::string::npos);
+            ++notifyCount;
+        }
+    }
+    assert(notifyCount == 2);
+    PASS();
+}
+
+// ================================
+// 57) getSubscriptionsForTarget → 구독 목록 조회
+// ================================
+
+void test_get_subscriptions_for_target()
+{
+    TEST("getSubscriptionsForTarget returns matching subs");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    // 1001 대상 구독 2개
+    std::string s1 = makeSubscribe("sip:1001@server", "sip:1002@client",
+                                    "gst-1", 1, "presence");
+    SipMessage m1;
+    assert(parseSipMessage(s1, m1));
+    UdpPacket p1{"10.0.0.2", 5060, s1};
+    std::string r1;
+    core->handlePacket(p1, m1, r1);
+
+    std::string s2 = makeSubscribe("sip:1001@server", "sip:1003@client",
+                                    "gst-2", 1, "dialog");
+    SipMessage m2;
+    assert(parseSipMessage(s2, m2));
+    UdpPacket p2{"10.0.0.3", 5060, s2};
+    std::string r2;
+    core->handlePacket(p2, m2, r2);
+
+    // 다른 대상 구독 1개
+    std::string s3 = makeSubscribe("sip:9999@server", "sip:1002@client",
+                                    "gst-3", 1, "presence");
+    SipMessage m3;
+    assert(parseSipMessage(s3, m3));
+    UdpPacket p3{"10.0.0.2", 5060, s3};
+    std::string r3;
+    core->handlePacket(p3, m3, r3);
+
+    auto subs = core->getSubscriptionsForTarget("sip:1001@server");
+    assert(subs.size() == 2);
+    PASS();
+}
+
+// ================================
+// 58) OPTIONS Allow 헤더에 SUBSCRIBE, NOTIFY 포함
+// ================================
+
+void test_options_includes_subscribe_notify()
+{
+    TEST("OPTIONS Allow header includes SUBSCRIBE, NOTIFY");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string raw = makeOptions("sip:server", "opt-sub-1");
+    SipMessage msg;
+    assert(parseSipMessage(raw, msg));
+    UdpPacket pkt{"10.0.0.2", 5060, raw};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+
+    assert(resp.find("SUBSCRIBE") != std::string::npos);
+    assert(resp.find("NOTIFY") != std::string::npos);
+    PASS();
+}
+
 // ================================
 // main
 // ================================
@@ -1966,6 +2591,28 @@ int main()
     test_message_in_dialog();
     test_message_missing_headers();
     test_options_includes_message_in_allow();
+
+    std::cout << "\n[Section 12] SUBSCRIBE\n";
+    test_subscribe_presence();
+    test_subscribe_missing_event();
+    test_subscribe_unsupported_event();
+    test_subscribe_unsubscribe();
+    test_subscribe_refresh();
+    test_subscribe_dialog_event();
+    test_subscribe_message_summary_event();
+    test_subscribe_missing_headers();
+    test_subscribe_invalid_expires();
+    test_subscribe_expires_clamped();
+
+    std::cout << "\n[Section 13] NOTIFY\n";
+    test_notify_with_subscription();
+    test_notify_no_subscription();
+    test_notify_missing_event();
+    test_notify_missing_subscription_state();
+    test_notify_terminated_removes_subscription();
+    test_notify_subscribers();
+    test_get_subscriptions_for_target();
+    test_options_includes_subscribe_notify();
 
     std::cout << "\n=================================\n";
     std::cout << "Results: " << testsPassed << " passed, " << testsFailed << " failed\n";

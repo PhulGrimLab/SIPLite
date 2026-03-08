@@ -157,6 +157,14 @@ bool SipCore::handlePacket(const UdpPacket& pkt,
     {
         return handleMessage(pkt, msg, outResponse);
     }
+    else if (methodUpper == "SUBSCRIBE")
+    {
+        return handleSubscribe(pkt, msg, outResponse);
+    }
+    else if (methodUpper == "NOTIFY")
+    {
+        return handleNotify(pkt, msg, outResponse);
+    }
 
     // Unsupported method
     outResponse = buildSimpleResponse(msg, 501, "Not Implemented");
@@ -1221,7 +1229,7 @@ bool SipCore::handleOptions(const UdpPacket& pkt,
     if (!callId.empty()) oss << "Call-ID: " << callId << "\r\n";
     if (!cseq.empty())   oss << "CSeq: "    << cseq   << "\r\n";
 
-    oss << "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER, MESSAGE\r\n";
+    oss << "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER, MESSAGE, SUBSCRIBE, NOTIFY\r\n";
     oss << "Accept: application/sdp\r\n";
     oss << "Server: SIPLite/0.1\r\n";
     oss << "Content-Length: 0\r\n";
@@ -1355,6 +1363,352 @@ bool SipCore::handleMessage(const UdpPacket& pkt,
         + " to=" + regCopy.ip + ":" + std::to_string(regCopy.port));
 
     return true;
+}
+
+// ================================
+// SIP SUBSCRIBE 요청 처리 (RFC 6665)
+// ================================
+// SUBSCRIBE는 이벤트 구독을 위한 메서드로, 서버는 구독 상태를 저장하고
+// 초기 NOTIFY를 전송한 후 200 OK를 반환한다.
+// Expires: 0은 구독 해지를 의미한다.
+bool SipCore::handleSubscribe(const UdpPacket& pkt,
+                              const SipMessage& msg,
+                              std::string& outResponse)
+{
+    std::string toHdr     = sanitizeHeaderValue(getHeader(msg, "to"));
+    std::string fromHdr   = sanitizeHeaderValue(getHeader(msg, "from"));
+    std::string callId    = sanitizeHeaderValue(getHeader(msg, "call-id"));
+    std::string cseqHdr   = sanitizeHeaderValue(getHeader(msg, "cseq"));
+    std::string eventHdr  = sanitizeHeaderValue(getHeader(msg, "event"));
+
+    if (toHdr.empty() || fromHdr.empty() || callId.empty() || cseqHdr.empty())
+    {
+        outResponse = buildSimpleResponse(msg, 400, "Bad Request");
+        return true;
+    }
+
+    // RFC 6665 §3.1.1: Event 헤더는 SUBSCRIBE에 필수
+    if (eventHdr.empty())
+    {
+        outResponse = buildSimpleResponse(msg, 489, "Bad Event");
+        return true;
+    }
+
+    // 지원하는 이벤트 패키지 확인 (presence, dialog, message-summary)
+    std::string eventLower = toLower(trim(eventHdr));
+    // event 파라미터 제거 (예: "presence;id=1" → "presence")
+    auto semiPos = eventLower.find(';');
+    std::string eventPackage = (semiPos != std::string::npos)
+        ? trim(eventLower.substr(0, semiPos)) : eventLower;
+
+    static const std::unordered_set<std::string> supportedEvents = {
+        "presence", "dialog", "message-summary"
+    };
+    if (supportedEvents.find(eventPackage) == supportedEvents.end())
+    {
+        outResponse = buildSimpleResponse(msg, 489, "Bad Event");
+        return true;
+    }
+
+    // Expires 처리
+    std::string expiresHdr = sanitizeHeaderValue(getHeader(msg, "expires"));
+    int expiresSec = SipConstants::DEFAULT_SUB_EXPIRES_SEC;
+    if (!expiresHdr.empty())
+    {
+        std::string trimmed = trim(expiresHdr);
+        int val = -1;
+        auto [ptr, ec] = std::from_chars(
+            trimmed.data(), trimmed.data() + trimmed.size(), val);
+        if (ec != std::errc{} || ptr != trimmed.data() + trimmed.size() || val < 0)
+        {
+            outResponse = buildSimpleResponse(msg, 400, "Bad Request - Invalid Expires");
+            return true;
+        }
+        expiresSec = val;
+    }
+    if (expiresSec > SipConstants::MAX_SUB_EXPIRES_SEC)
+    {
+        expiresSec = SipConstants::MAX_SUB_EXPIRES_SEC;
+    }
+
+    std::string fromUri = extractUriFromHeader(fromHdr);
+    std::string toUri   = extractUriFromHeader(toHdr);
+    std::string fromTag = extractTagFromHeader(fromHdr);
+
+    int cseqNum = parseCSeqNum(cseqHdr);
+    if (cseqNum < 0)
+    {
+        outResponse = buildSimpleResponse(msg, 400, "Bad Request");
+        return true;
+    }
+
+    // Contact 추출 (구독자의 NOTIFY 수신 주소)
+    std::string contactHdr = sanitizeHeaderValue(getHeader(msg, "contact"));
+    std::string contactUri = extractUriFromHeader(contactHdr);
+
+    // Expires: 0 = 구독 해지
+    if (expiresSec == 0)
+    {
+        std::string notifyMsg;
+        {
+            std::lock_guard<std::mutex> lock(subMutex_);
+            auto it = subscriptions_.find(callId);
+            if (it != subscriptions_.end())
+            {
+                it->second.state = Subscription::State::TERMINATED;
+                notifyMsg = buildNotifyUnlocked_(callId, "terminated;reason=deactivated");
+                subscriptions_.erase(it);
+            }
+            else
+            {
+                // 존재하지 않는 구독의 해지 — 응답은 보내되 NOTIFY는 건너뜀
+            }
+        }
+
+        // NOTIFY(terminated) 전송
+        if (sender_ && !notifyMsg.empty())
+        {
+            sender_(pkt.remoteIp, pkt.remotePort, notifyMsg);
+        }
+
+        // 200 OK with Expires: 0
+        std::ostringstream oss;
+        oss << "SIP/2.0 200 OK\r\n";
+        std::string via = sanitizeHeaderValue(getHeader(msg, "via"));
+        if (!via.empty()) oss << "Via: " << via << "\r\n";
+        oss << "From: " << fromHdr << "\r\n";
+        oss << "To: " << ensureToTag(toHdr) << "\r\n";
+        oss << "Call-ID: " << callId << "\r\n";
+        oss << "CSeq: " << cseqHdr << "\r\n";
+        oss << "Expires: 0\r\n";
+        oss << "Server: SIPLite/0.1\r\n";
+        oss << "Content-Length: 0\r\n";
+        oss << "\r\n";
+        outResponse = oss.str();
+
+        Logger::instance().info("[handleSubscribe] Unsubscribed: callId=" + callId
+            + " event=" + eventPackage);
+        return true;
+    }
+
+    // 새 구독 또는 갱신
+    std::string toTag;
+    {
+        std::lock_guard<std::mutex> lock(subMutex_);
+
+        auto it = subscriptions_.find(callId);
+        if (it != subscriptions_.end())
+        {
+            // 기존 구독 갱신 (refresh)
+            it->second.expiresAt = std::chrono::steady_clock::now()
+                + std::chrono::seconds(expiresSec);
+            it->second.cseq = cseqNum;
+            it->second.state = Subscription::State::ACTIVE;
+            toTag = it->second.toTag;
+        }
+        else
+        {
+            // 새 구독 생성
+            if (subscriptions_.size() >= SipConstants::MAX_SUBSCRIPTIONS)
+            {
+                outResponse = buildSimpleResponse(msg, 503, "Service Unavailable");
+                return true;
+            }
+
+            Subscription sub;
+            sub.subscriberAor = fromUri;
+            sub.targetAor = toUri;
+            sub.event = eventPackage;
+            sub.callId = callId;
+            sub.fromTag = fromTag;
+            sub.toTag = generateTag();
+            sub.subscriberIp = pkt.remoteIp;
+            sub.subscriberPort = pkt.remotePort;
+            sub.contact = contactUri;
+            sub.cseq = cseqNum;
+            sub.expiresAt = std::chrono::steady_clock::now()
+                + std::chrono::seconds(expiresSec);
+            sub.state = Subscription::State::ACTIVE;
+            toTag = sub.toTag;
+            subscriptions_[callId] = std::move(sub);
+        }
+    }
+
+    // 200 OK with Expires
+    {
+        std::ostringstream oss;
+        oss << "SIP/2.0 200 OK\r\n";
+        std::string via = sanitizeHeaderValue(getHeader(msg, "via"));
+        if (!via.empty()) oss << "Via: " << via << "\r\n";
+        oss << "From: " << fromHdr << "\r\n";
+        // To 태그 추가
+        {
+            std::string toWithTag = toHdr;
+            std::string existingTag = extractTagFromHeader(toHdr);
+            if (existingTag.empty())
+            {
+                toWithTag += ";tag=" + toTag;
+            }
+            oss << "To: " << toWithTag << "\r\n";
+        }
+        oss << "Call-ID: " << callId << "\r\n";
+        oss << "CSeq: " << cseqHdr << "\r\n";
+        oss << "Expires: " << expiresSec << "\r\n";
+        oss << "Server: SIPLite/0.1\r\n";
+        oss << "Content-Length: 0\r\n";
+        oss << "\r\n";
+        outResponse = oss.str();
+    }
+
+    // initial NOTIFY 전송 (RFC 6665 §4.4.1: SUBSCRIBE에 대한 즉시 NOTIFY)
+    if (sender_)
+    {
+        std::string notifyMsg = buildNotify(callId, "active");
+        sender_(pkt.remoteIp, pkt.remotePort, notifyMsg);
+    }
+
+    Logger::instance().info("[handleSubscribe] Subscribed: callId=" + callId
+        + " event=" + eventPackage + " subscriber=" + fromUri
+        + " target=" + toUri + " expires=" + std::to_string(expiresSec));
+
+    return true;
+}
+
+// ================================
+// SIP NOTIFY 요청 처리 (RFC 6665)
+// ================================
+// 단말이 보내는 NOTIFY를 수신하거나, 프록시로서 전달한다.
+bool SipCore::handleNotify(const UdpPacket& pkt,
+                           const SipMessage& msg,
+                           std::string& outResponse)
+{
+    std::string toHdr   = sanitizeHeaderValue(getHeader(msg, "to"));
+    std::string fromHdr = sanitizeHeaderValue(getHeader(msg, "from"));
+    std::string callId  = sanitizeHeaderValue(getHeader(msg, "call-id"));
+    std::string eventHdr = sanitizeHeaderValue(getHeader(msg, "event"));
+    std::string subStateHdr = sanitizeHeaderValue(getHeader(msg, "subscription-state"));
+
+    if (toHdr.empty() || fromHdr.empty() || callId.empty())
+    {
+        outResponse = buildSimpleResponse(msg, 400, "Bad Request");
+        return true;
+    }
+
+    // RFC 6665 §3.2.2: Event 헤더는 NOTIFY에 필수
+    if (eventHdr.empty())
+    {
+        outResponse = buildSimpleResponse(msg, 489, "Bad Event");
+        return true;
+    }
+
+    // Subscription-State 헤더 확인 (RFC 6665 §4.1.3: NOTIFY에 필수)
+    if (subStateHdr.empty())
+    {
+        outResponse = buildSimpleResponse(msg, 400, "Bad Request - Missing Subscription-State");
+        return true;
+    }
+
+    // 해당 구독이 존재하는지 확인
+    bool subFound = false;
+    std::string subscriberIp;
+    uint16_t subscriberPort = 0;
+    {
+        std::lock_guard<std::mutex> lock(subMutex_);
+        auto it = subscriptions_.find(callId);
+        if (it != subscriptions_.end())
+        {
+            subFound = true;
+            subscriberIp = it->second.subscriberIp;
+            subscriberPort = it->second.subscriberPort;
+
+            // Subscription-State 처리
+            std::string stateLower = toLower(trim(subStateHdr));
+            if (stateLower.find("terminated") == 0)
+            {
+                it->second.state = Subscription::State::TERMINATED;
+                subscriptions_.erase(it);
+            }
+        }
+    }
+
+    if (!subFound)
+    {
+        // RFC 6665 §4.1.3: 구독이 없으면 481 응답
+        outResponse = buildSimpleResponse(msg, 481, "Subscription Does Not Exist");
+        return true;
+    }
+
+    // NOTIFY를 구독자에게 전달 (프록시 동작)
+    // 단말이 NOTIFY를 보내는 경우: 예를 들어 notifier → proxy → subscriber
+    // 단, 서버 자체가 notifier인 경우는 outResponse로 200 OK 반환
+    if (sender_ && !subscriberIp.empty()
+        && (pkt.remoteIp != subscriberIp || pkt.remotePort != subscriberPort))
+    {
+        // notifier에서 온 NOTIFY를 subscriber에게 전달
+        std::string fwdNotify = addProxyVia(pkt.data);
+        fwdNotify = decrementMaxForwards(fwdNotify);
+        sender_(subscriberIp, subscriberPort, fwdNotify);
+
+        Logger::instance().info("[handleNotify] Forwarded NOTIFY: callId=" + callId
+            + " to=" + subscriberIp + ":" + std::to_string(subscriberPort));
+    }
+
+    outResponse = buildSimpleResponse(msg, 200, "OK");
+    return true;
+}
+
+// ================================
+// NOTIFY 메시지 빌더
+// ================================
+std::string SipCore::buildNotify(const std::string& subKey,
+                                  const std::string& subState,
+                                  const std::string& body,
+                                  const std::string& contentType) const
+{
+    std::lock_guard<std::mutex> lock(subMutex_);
+    return buildNotifyUnlocked_(subKey, subState, body, contentType);
+}
+
+std::string SipCore::buildNotifyUnlocked_(const std::string& subKey,
+                                           const std::string& subState,
+                                           const std::string& body,
+                                           const std::string& contentType) const
+{
+    auto it = subscriptions_.find(subKey);
+    if (it == subscriptions_.end())
+        return "";
+
+    const auto& sub = it->second;
+    int notifyCSeq = sub.cseq + 1;
+
+    std::ostringstream oss;
+    std::string targetUri = sub.contact.empty() ? sub.subscriberAor : sub.contact;
+    oss << "NOTIFY " << targetUri << " SIP/2.0\r\n";
+    oss << "Via: SIP/2.0/UDP " << localAddr_ << ":" << localPort_
+        << ";branch=z9hG4bK-notify-" << subKey << "-" << notifyCSeq << "\r\n";
+    oss << "From: <" << sub.targetAor << ">;tag=" << sub.toTag << "\r\n";
+    oss << "To: <" << sub.subscriberAor << ">;tag=" << sub.fromTag << "\r\n";
+    oss << "Call-ID: " << sub.callId << "\r\n";
+    oss << "CSeq: " << notifyCSeq << " NOTIFY\r\n";
+    oss << "Event: " << sub.event << "\r\n";
+    oss << "Subscription-State: " << subState << "\r\n";
+    oss << "Max-Forwards: 70\r\n";
+    oss << "Server: SIPLite/0.1\r\n";
+
+    if (!body.empty() && !contentType.empty())
+    {
+        oss << "Content-Type: " << contentType << "\r\n";
+        oss << "Content-Length: " << body.size() << "\r\n";
+        oss << "\r\n";
+        oss << body;
+    }
+    else
+    {
+        oss << "Content-Length: 0\r\n";
+        oss << "\r\n";
+    }
+
+    return oss.str();
 }
 
 // Helper function to extract tag parameter from a SIP header value
