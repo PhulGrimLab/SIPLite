@@ -336,29 +336,32 @@ void ConsoleInterface::showRegisteredTerminals()
             << "├──────────────────────────────────────────────────────────────────────────────────────┤\n";
 
         int idx = 1;
-        std::size_t activeCount = 0;
+        std::size_t onlineCount = 0;
+        std::size_t offlineCount = 0;
+        std::size_t inCallCount = 0;
         for (const auto& reg : registrations)
         {
             const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
                 reg.expiresAt - now).count();
 
-            bool expired = (remaining <= 0);
             bool inCall = busyAors.count(reg.aor) > 0;
 
             std::string status;
-            if (expired)
+            if (!reg.loggedIn || remaining <= 0)
             {
-                status = "만료";
+                status = "오프라인";
+                ++offlineCount;
             }
             else if (inCall)
             {
                 status = "통화중";
-                ++activeCount;
+                ++onlineCount;
+                ++inCallCount;
             }
             else
             {
                 status = "대기";
-                ++activeCount;
+                ++onlineCount;
             }
 
             std::array<char, 32> ipPortBuf{};
@@ -375,10 +378,10 @@ void ConsoleInterface::showRegisteredTerminals()
         }
 
         oss << "├──────────────────────────────────────────────────────────────────────────────────────┤\n"
-            << "│  활성: " << std::left << std::setw(3) << activeCount
-            << "  통화중: " << std::left << std::setw(3) << busyAors.size()
-            << "  만료: " << std::left << std::setw(3) << (registrations.size() - activeCount)
-            << "                                                          │\n";
+            << "│  온라인: " << std::left << std::setw(3) << onlineCount
+            << "  통화중: " << std::left << std::setw(3) << inCallCount
+            << "  오프라인: " << std::left << std::setw(3) << offlineCount
+            << "                                                        │\n";
     }
 
     oss << "├──────────────────────────────────────────────────────────────────────────────────────┤\n"

@@ -348,6 +348,17 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
         return true;
     }
 
+    // XML에 등록된 단말만 REGISTER 허용 (화이트리스트 방식)
+    {
+        std::lock_guard<std::mutex> lock(regMutex_);
+        auto it = regs_.find(aor);
+        if (it == regs_.end() || !it->second.isStatic)
+        {
+            outResponse = buildSimpleResponse(msg, 403, "Forbidden");
+            return true;
+        }
+    }
+
     // Expires 헤더 또는 Contact 헤더의 expires 파라미터에서 유효 시간(TTL)을 추출하여 등록의 만료 시점을 계산한다.
     // SIP REGISTER 요청 처리 중에는 등록 정보의 추가, 갱신, 삭제 등의 처리가 수행되며, 
     // 필요한 경우 적절한 SIP 응답 메시지를 생성하여 outResponse에 반환할 수 있도록 구현되어 있다.
@@ -433,20 +444,10 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
     reg.expiresAt = std::chrono::steady_clock::now() +
                     std::chrono::seconds(expiresSec);
     reg.loggedIn = true;
+    reg.isStatic = true;  // 여기에 도달하는 단말은 항상 isStatic
 
     {
         std::lock_guard<std::mutex> lock(regMutex_);
-        auto it = regs_.find(aor);
-        if (it == regs_.end() && regs_.size() >= SipConstants::MAX_REGISTRATIONS)
-        {
-            outResponse = buildSimpleResponse(msg, 503, "Service Unavailable");
-            return true;
-        }
-        // 기존 정적 등록 단말이면 isStatic 속성 유지
-        if (it != regs_.end() && it->second.isStatic)
-        {
-            reg.isStatic = true;
-        }
         regs_[aor] = reg;
     }
 
