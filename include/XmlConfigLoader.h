@@ -151,8 +151,8 @@ public:
                 continue;
             }
             
-            // Contact 검증
-            if (!isValidContact(config.contact))
+            // Contact 검증 (선택적 - 비어있으면 로그인 시 실제 패킷에서 설정됨)
+            if (!config.contact.empty() && !isValidContact(config.contact))
             {
                 std::cerr << "[XmlConfigLoader] 잘못된 Contact: " << sanitizeForDisplay(config.contact, 100, '?', false) << "\n";
                 pos = termEnd + 11;
