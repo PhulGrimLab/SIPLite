@@ -1,5 +1,6 @@
 #include "ConsoleInterface.h"
 #include "SipUtils.h"
+#include "TcpServer.h"
 
 #include <sstream>
 #include <algorithm>
@@ -291,13 +292,22 @@ void ConsoleInterface::showServerStatus()
         << "├──────────────────────────────────────────────────────────┤\n"
         << "│  서버 상태      : " << std::left << std::setw(38)
         << "실행 중 ✓" << "│\n"
+        << "│  전송 프로토콜  : " << std::left << std::setw(38)
+        << (tcpServer_ ? "UDP + TCP" : "UDP") << "│\n"
         << "│  등록된 단말 수 : " << std::left << std::setw(38)
         << stats.registrationCount << "│\n"
         << "│  로그인 단말 수 : " << std::left << std::setw(38)
         << stats.loggedInCount << "│\n"
         << "│  활성 통화 수   : " << std::left << std::setw(38)
-        << stats.activeCallCount << "│\n"
-        << "│  현재 시간      : " << std::left << std::setw(38)
+        << stats.activeCallCount << "│\n";
+
+    if (tcpServer_)
+    {
+        oss << "│  TCP 연결 수    : " << std::left << std::setw(38)
+            << tcpServer_->connectionCount() << "│\n";
+    }
+
+    oss << "│  현재 시간      : " << std::left << std::setw(38)
         << timeBuf.data() << "│\n"
         << "└──────────────────────────────────────────────────────────┘\n";
 

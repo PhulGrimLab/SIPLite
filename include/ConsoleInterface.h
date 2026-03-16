@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UdpServer.h"
+#include "TcpServer.h"
 #include "SipCore.h"
 
 #include <atomic>
@@ -24,8 +25,9 @@
 class ConsoleInterface
 {
 public:
-    explicit ConsoleInterface(UdpServer& server)
+    explicit ConsoleInterface(UdpServer& server, TcpServer* tcpServer = nullptr)
         : server_(server)
+        , tcpServer_(tcpServer)
         , running_(false)
         , exitRequested_(false)
         , inputReady_(false)
@@ -77,6 +79,7 @@ private:
     
 private:
     UdpServer& server_;
+    TcpServer* tcpServer_;  // nullptr이면 TCP 비활성
     
     // 스레드 제어
     std::atomic<bool> running_;

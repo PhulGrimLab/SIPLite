@@ -1,4 +1,5 @@
 #include "UdpServer.h"
+#include "TcpServer.h"
 #include "UdpPacket.h"
 #include "XmlConfigLoader.h"
 #include "ConsoleInterface.h"
@@ -97,7 +98,7 @@ int main(int argc, char* argv[])
     Logger::instance().init("logs", retentionDays);
     Logger::instance().info("SIPLite Server v0.1 시작 중");
     Logger::instance().info("[Logger] Log retention days: " + std::to_string(retentionDays));
-    UdpServer server;
+    UdpServer udpServer;
     const std::string bindIp = "0.0.0.0";
     const uint16_t bindPort = 5060;     // 표준 SIP 포트
 
@@ -113,19 +114,43 @@ int main(int argc, char* argv[])
     std::cout << "[초기화] 단말 설정 파일 로드 중: " << configPath << "\n";
     auto terminals = XmlConfigLoader::loadTerminals(configPath);
     
-    // 서버 시작
-    if (!server.start(bindIp, bindPort, workerCount)) 
+    // UDP 서버 시작
+    if (!udpServer.start(bindIp, bindPort, workerCount)) 
     {
-        Logger::instance().error("[오류] 서버 시작 실패");
+        Logger::instance().error("[오류] UDP 서버 시작 실패");
         return 1;
     }
+
+    // TCP 서버 시작 (UDP 서버의 SipCore를 공유)
+    TcpServer tcpServer(udpServer.sipCore());
+    if (!tcpServer.start(bindIp, bindPort, workerCount))
+    {
+        // TCP 시작 실패는 치명적이지 않음 — UDP만으로 동작
+        Logger::instance().error("[경고] TCP 서버 시작 실패 (UDP만 사용)");
+        std::cerr << "[경고] TCP 서버 시작 실패 (UDP만 사용)\n";
+    }
+    else
+    {
+        std::cout << "[서버] TCP 서버 실행 중 (포트: " << bindPort << ")\n";
+    }
+
+    // 전송 프로토콜 라우팅 콜백 설정
+    // TCP 연결이 있으면 TCP로, 없으면 UDP로 전송
+    udpServer.sipCore().setSender(
+        [&udpServer, &tcpServer](const std::string& ip, uint16_t port, const std::string& data) -> bool {
+            if (tcpServer.hasConnection(ip, port))
+            {
+                return tcpServer.sendTo(ip, port, data);
+            }
+            return udpServer.sendTo(ip, port, data);
+        });
 
     // 단말 등록
     if (!terminals.empty())
     {
         std::cout << "\n[초기화] 단말 등록 중...\n";
         std::size_t registered = XmlConfigLoader::registerTerminals(
-            server.sipCore(), terminals);
+            udpServer.sipCore(), terminals);
         std::cout << "[초기화] " << registered << "개의 단말이 등록되었습니다.\n";
     }
     else
@@ -136,7 +161,7 @@ int main(int argc, char* argv[])
     std::cout << "\n[서버] UDP 서버 실행 중 (포트: " << bindPort << ")\n";
 
     // 콘솔 인터페이스 시작
-    ConsoleInterface console(server);
+    ConsoleInterface console(udpServer, &tcpServer);
     console.start();
 
     // 메인 루프: 콘솔 종료 요청 또는 SIGINT 대기
@@ -154,11 +179,11 @@ int main(int argc, char* argv[])
         if (now - lastCleanup >= cleanupInterval)
         {
             // RFC 3261 §16.7 Timer C: INVITE 타임아웃 확인 (180초)
-            server.sipCore().cleanupTimerC();
+            udpServer.sipCore().cleanupTimerC();
             // 만료된 등록 및 stale 통화/트랜잭션 정리
-            server.sipCore().cleanupExpiredRegistrations();
-            server.sipCore().cleanupStaleCalls();
-            server.sipCore().cleanupStaleTransactions();
+            udpServer.sipCore().cleanupExpiredRegistrations();
+            udpServer.sipCore().cleanupStaleCalls();
+            udpServer.sipCore().cleanupStaleTransactions();
             lastCleanup = now;
         }
 
@@ -168,7 +193,8 @@ int main(int argc, char* argv[])
     Logger::instance().info("[서버] 종료 중...");
     
     console.stop();
-    server.stop();
+    tcpServer.stop();
+    udpServer.stop();
     
     Logger::instance().info("[서버] 정상 종료되었습니다.");
 
