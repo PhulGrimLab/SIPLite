@@ -1040,6 +1040,101 @@ void test_bye_forwarded_to_callee()
     PASS();
 }
 
+void test_mixed_transport_ack_and_bye()
+{
+    TEST("ACK/BYE routed correctly when caller source port changes");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    preRegisterAndLogin(*core, sent, "sip:1001@server", "<sip:1001@10.0.0.1:5060>",
+                        "10.0.0.1", 5060, "mixed-reg");
+    SipMessage msg;
+    std::string resp;
+
+    std::string invRaw = makeInvite("sip:1001@server", "sip:1002@client", "mixed-call", 1, "mix-tag");
+    assert(parseSipMessage(invRaw, msg));
+    UdpPacket invPkt{"10.0.0.2", 5060, invRaw};
+    core->handlePacket(invPkt, msg, resp);
+
+    std::string resp200 =
+        "SIP/2.0 200 OK\r\n"
+        "Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-proxy\r\n"
+        "Via: SIP/2.0/UDP caller:5060\r\n"
+        "From: <sip:1002@client>;tag=mix-tag\r\n"
+        "To: <sip:1001@server>;tag=callee-mix\r\n"
+        "Call-ID: mixed-call\r\n"
+        "CSeq: 1 INVITE\r\n"
+        "Contact: <sip:1001@10.0.0.1:5060>\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage resp200Msg;
+    assert(parseSipMessage(resp200, resp200Msg));
+    UdpPacket resp200Pkt{"10.0.0.1", 5060, resp200};
+    core->handleResponse(resp200Pkt, resp200Msg);
+
+    sent.clear();
+
+    std::string ackRaw =
+        "ACK sip:1001@10.0.0.1:5060;transport=udp SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP caller:5090\r\n"
+        "From: <sip:1002@client>;tag=mix-tag\r\n"
+        "To: <sip:1001@server>;tag=callee-mix\r\n"
+        "Call-ID: mixed-call\r\n"
+        "CSeq: 1 ACK\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage ackMsg;
+    assert(parseSipMessage(ackRaw, ackMsg));
+    UdpPacket ackPkt{"10.0.0.2", 5090, ackRaw};
+    core->handlePacket(ackPkt, ackMsg, resp);
+
+    auto call = core->findCallSafe("mixed-call");
+    assert(call.has_value());
+    assert(call->confirmed);
+
+    bool foundAckToCallee = false;
+    for (const auto& m : sent)
+    {
+        if (m.ip == "10.0.0.1" && m.port == 5060 && m.data.find("ACK ") == 0)
+        {
+            foundAckToCallee = true;
+        }
+    }
+    assert(foundAckToCallee);
+
+    sent.clear();
+
+    std::string byeRaw =
+        "BYE sip:1001@10.0.0.1:5060;transport=udp SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP caller:5090\r\n"
+        "From: <sip:1002@client>;tag=mix-tag\r\n"
+        "To: <sip:1001@server>;tag=callee-mix\r\n"
+        "Call-ID: mixed-call\r\n"
+        "CSeq: 2 BYE\r\n"
+        "Content-Length: 0\r\n\r\n";
+    SipMessage byeMsg;
+    assert(parseSipMessage(byeRaw, byeMsg));
+    UdpPacket byePkt{"10.0.0.2", 5090, byeRaw};
+    core->handlePacket(byePkt, byeMsg, resp);
+
+    assert(resp.find("200 OK") != std::string::npos);
+
+    bool foundByeToCallee = false;
+    bool foundByeBackToCaller = false;
+    for (const auto& m : sent)
+    {
+        if (m.ip == "10.0.0.1" && m.port == 5060 && m.data.find("BYE ") == 0)
+        {
+            foundByeToCallee = true;
+        }
+        if (m.ip == "10.0.0.2" && m.data.find("BYE ") == 0)
+        {
+            foundByeBackToCaller = true;
+        }
+    }
+    assert(foundByeToCallee);
+    assert(!foundByeBackToCaller);
+    PASS();
+}
+
 // ================================
 // 23) 지원하지 않는 메서드 → 501
 // ================================
@@ -2542,6 +2637,7 @@ int main()
     test_bye_terminates_call();
     test_bye_nonexistent_call();
     test_bye_forwarded_to_callee();
+    test_mixed_transport_ack_and_bye();
 
     std::cout << "\n[Section 4] CANCEL\n";
     test_cancel_missing_headers();

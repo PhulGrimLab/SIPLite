@@ -1150,14 +1150,27 @@ bool SipCore::handleAck(const UdpPacket& pkt,
         auto it = activeCalls_.find(callId);
         if (it != activeCalls_.end())
         {
+            DialogPeerSide side = classifyDialogPeerSide(it->second, msg, pkt);
             Logger::instance().info("[handleAck] ActiveCall found: callId=" + callId
                 + " callerIp=" + it->second.callerIp + ":" + std::to_string(it->second.callerPort)
                 + " calleeIp=" + it->second.calleeIp + ":" + std::to_string(it->second.calleePort)
                 + " pktFrom=" + pkt.remoteIp + ":" + std::to_string(pkt.remotePort));
 
-            it->second.confirmed = true;
-            ackFwdIp = it->second.calleeIp;
-            ackFwdPort = it->second.calleePort;
+            if (side == DialogPeerSide::Caller)
+            {
+                it->second.confirmed = true;
+                ackFwdIp = it->second.calleeIp;
+                ackFwdPort = it->second.calleePort;
+            }
+            else if (side == DialogPeerSide::Callee)
+            {
+                it->second.confirmed = true;
+            }
+            else
+            {
+                Logger::instance().error("[handleAck] ACK source mismatch: callId=" + callId
+                    + " pktFrom=" + pkt.remoteIp + ":" + std::to_string(pkt.remotePort));
+            }
         }
         else
         {
@@ -1229,25 +1242,25 @@ bool SipCore::handleBye(const UdpPacket& pkt,
         auto dit = dialogs_.find(callId);
         if (dit != dialogs_.end())
         {
-            found = true;
-            // BYE 발신자를 판별하여 상대방에게 전달
-            if (pkt.remoteIp == dit->second.callerIp &&
-                pkt.remotePort == dit->second.callerPort)
+            DialogPeerSide side = classifyDialogPeerSide(dit->second, nullptr, msg, pkt);
+            if (side == DialogPeerSide::Caller)
             {
+                found = true;
                 // caller가 BYE 보냄 → callee에게 전달
                 fwdIp = dit->second.calleeIp;
                 fwdPort = dit->second.calleePort;
                 fwdContactUri = dit->second.remoteTarget;  // callee의 Contact URI
             }
-            else
+            else if (side == DialogPeerSide::Callee)
             {
+                found = true;
                 // callee가 BYE 보냄 → caller에게 전달
                 fwdIp = dit->second.callerIp;
                 fwdPort = dit->second.callerPort;
                 fwdContactUri = dit->second.callerContact; // caller의 Contact URI
             }
 
-            if (dit->second.byeReceived)
+            if (found && dit->second.byeReceived)
             {
                 // 이전 BYE와 같은 발신자인지 확인
                 if (pkt.remoteIp == dit->second.byeSenderIp &&
@@ -1263,7 +1276,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                     dialogs_.erase(dit);
                 }
             }
-            else
+            else if (found)
             {
                 // 첫 번째 BYE → 삭제하지 않고 표시만
                 dit->second.byeReceived = true;
@@ -1278,15 +1291,16 @@ bool SipCore::handleBye(const UdpPacket& pkt,
         {
             if (!found)
             {
-                found = true;
-                if (pkt.remoteIp == it->second.callerIp &&
-                    pkt.remotePort == it->second.callerPort)
+                DialogPeerSide side = classifyDialogPeerSide(it->second, msg, pkt);
+                if (side == DialogPeerSide::Caller)
                 {
+                    found = true;
                     fwdIp = it->second.calleeIp;
                     fwdPort = it->second.calleePort;
                 }
-                else
+                else if (side == DialogPeerSide::Callee)
                 {
+                    found = true;
                     fwdIp = it->second.callerIp;
                     fwdPort = it->second.callerPort;
                 }
@@ -1552,15 +1566,14 @@ bool SipCore::handleMessage(const UdpPacket& pkt,
             std::string fwdIp;
             uint16_t fwdPort = 0;
             std::string fwdContactUri;
-
-            if (pkt.remoteIp == dit->second.callerIp &&
-                pkt.remotePort == dit->second.callerPort)
+            DialogPeerSide side = classifyDialogPeerSide(dit->second, nullptr, msg, pkt);
+            if (side == DialogPeerSide::Caller)
             {
                 fwdIp = dit->second.calleeIp;
                 fwdPort = dit->second.calleePort;
                 fwdContactUri = dit->second.remoteTarget;
             }
-            else
+            else if (side == DialogPeerSide::Callee)
             {
                 fwdIp = dit->second.callerIp;
                 fwdPort = dit->second.callerPort;
@@ -2570,4 +2583,102 @@ std::string SipCore::buildRegisterAuthChallenge(const SipMessage& req,
     oss << "Content-Length: 0\r\n";
     oss << "\r\n";
     return oss.str();
+}
+
+SipCore::DialogPeerSide SipCore::classifyDialogPeerSide(const ActiveCall& call,
+                                                        const SipMessage& msg,
+                                                        const UdpPacket& pkt) const
+{
+    const std::string fromHdr = sanitizeHeaderValue(getHeader(msg, "from"));
+    const std::string toHdr = sanitizeHeaderValue(getHeader(msg, "to"));
+    const std::string fromTag = extractTagFromHeader(fromHdr);
+    const std::string toTag = extractTagFromHeader(toHdr);
+    const std::string fromUri = extractUriFromHeader(fromHdr);
+    const std::string toUri = extractUriFromHeader(toHdr);
+
+    if (!fromTag.empty() && !toTag.empty())
+    {
+        if (fromTag == call.fromTag && (call.toTag.empty() || toTag == call.toTag))
+        {
+            return DialogPeerSide::Caller;
+        }
+        if (!call.toTag.empty() && fromTag == call.toTag && toTag == call.fromTag)
+        {
+            return DialogPeerSide::Callee;
+        }
+    }
+
+    if (!fromUri.empty())
+    {
+        if (fromUri == call.fromUri)
+        {
+            return DialogPeerSide::Caller;
+        }
+        if (fromUri == call.toUri)
+        {
+            return DialogPeerSide::Callee;
+        }
+    }
+
+    if (!toUri.empty())
+    {
+        if (toUri == call.toUri)
+        {
+            return DialogPeerSide::Caller;
+        }
+        if (toUri == call.fromUri)
+        {
+            return DialogPeerSide::Callee;
+        }
+    }
+
+    if (pkt.remoteIp == call.callerIp && pkt.remotePort == call.callerPort)
+    {
+        return DialogPeerSide::Caller;
+    }
+    if (pkt.remoteIp == call.calleeIp && pkt.remotePort == call.calleePort)
+    {
+        return DialogPeerSide::Callee;
+    }
+
+    return DialogPeerSide::Unknown;
+}
+
+SipCore::DialogPeerSide SipCore::classifyDialogPeerSide(const Dialog& dlg,
+                                                        const ActiveCall* call,
+                                                        const SipMessage& msg,
+                                                        const UdpPacket& pkt) const
+{
+    const std::string fromHdr = sanitizeHeaderValue(getHeader(msg, "from"));
+    const std::string toHdr = sanitizeHeaderValue(getHeader(msg, "to"));
+    const std::string fromTag = extractTagFromHeader(fromHdr);
+    const std::string toTag = extractTagFromHeader(toHdr);
+
+    if (!fromTag.empty() && !toTag.empty())
+    {
+        if (fromTag == dlg.callerTag && (dlg.calleeTag.empty() || toTag == dlg.calleeTag))
+        {
+            return DialogPeerSide::Caller;
+        }
+        if (!dlg.calleeTag.empty() && fromTag == dlg.calleeTag && toTag == dlg.callerTag)
+        {
+            return DialogPeerSide::Callee;
+        }
+    }
+
+    if (call != nullptr)
+    {
+        return classifyDialogPeerSide(*call, msg, pkt);
+    }
+
+    if (pkt.remoteIp == dlg.callerIp && pkt.remotePort == dlg.callerPort)
+    {
+        return DialogPeerSide::Caller;
+    }
+    if (pkt.remoteIp == dlg.calleeIp && pkt.remotePort == dlg.calleePort)
+    {
+        return DialogPeerSide::Callee;
+    }
+
+    return DialogPeerSide::Unknown;
 }

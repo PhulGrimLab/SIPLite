@@ -1051,6 +1051,14 @@ private:
     std::string buildRegisterAuthChallenge(const SipMessage& req,
                                            const std::string& nonce,
                                            bool stale);
+    enum class DialogPeerSide { Unknown, Caller, Callee };
+    DialogPeerSide classifyDialogPeerSide(const ActiveCall& call,
+                                          const SipMessage& msg,
+                                          const UdpPacket& pkt) const;
+    DialogPeerSide classifyDialogPeerSide(const Dialog& dlg,
+                                          const ActiveCall* call,
+                                          const SipMessage& msg,
+                                          const UdpPacket& pkt) const;
 
 private:
     struct DigestNonceState
