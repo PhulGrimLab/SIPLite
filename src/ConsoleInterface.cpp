@@ -1,6 +1,5 @@
 #include "ConsoleInterface.h"
 #include "SipUtils.h"
-#include "TcpServer.h"
 
 #include <sstream>
 #include <algorithm>
@@ -285,6 +284,16 @@ void ConsoleInterface::showServerStatus()
         std::snprintf(timeBuf.data(), timeBuf.size(), "N/A");
     }
 
+    std::string transports = "UDP";
+    if (tcpServer_ != nullptr)
+    {
+        transports += " + TCP";
+    }
+    if (tlsServer_ != nullptr)
+    {
+        transports += " + TLS";
+    }
+
     std::ostringstream oss;
     oss << "\n"
         << "┌──────────────────────────────────────────────────────────┐\n"
@@ -293,7 +302,7 @@ void ConsoleInterface::showServerStatus()
         << "│  서버 상태      : " << std::left << std::setw(38)
         << "실행 중 ✓" << "│\n"
         << "│  전송 프로토콜  : " << std::left << std::setw(38)
-        << (tcpServer_ ? "UDP + TCP" : "UDP") << "│\n"
+        << transports << "│\n"
         << "│  등록된 단말 수 : " << std::left << std::setw(38)
         << stats.registrationCount << "│\n"
         << "│  로그인 단말 수 : " << std::left << std::setw(38)
@@ -305,6 +314,11 @@ void ConsoleInterface::showServerStatus()
     {
         oss << "│  TCP 연결 수    : " << std::left << std::setw(38)
             << tcpServer_->connectionCount() << "│\n";
+    }
+    if (tlsServer_)
+    {
+        oss << "│  TLS 연결 수    : " << std::left << std::setw(38)
+            << tlsServer_->connectionCount() << "│\n";
     }
 
     oss << "│  현재 시간      : " << std::left << std::setw(38)

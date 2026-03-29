@@ -214,7 +214,7 @@ int main(int argc, char* argv[])
     std::cout << "\n[서버] UDP 서버 실행 중 (포트: " << bindPort << ")\n";
 
     // 콘솔 인터페이스 시작
-    ConsoleInterface console(udpServer, &tcpServer);
+    ConsoleInterface console(udpServer, &tcpServer, tlsStarted ? &tlsServer : nullptr);
     console.start();
 
     // 메인 루프: 콘솔 종료 요청 또는 SIGINT 대기

@@ -2,6 +2,7 @@
 
 #include "UdpServer.h"
 #include "TcpServer.h"
+#include "TlsServer.h"
 #include "SipCore.h"
 
 #include <atomic>
@@ -25,9 +26,12 @@
 class ConsoleInterface
 {
 public:
-    explicit ConsoleInterface(UdpServer& server, TcpServer* tcpServer = nullptr)
+    explicit ConsoleInterface(UdpServer& server,
+                              TcpServer* tcpServer = nullptr,
+                              TlsServer* tlsServer = nullptr)
         : server_(server)
         , tcpServer_(tcpServer)
+        , tlsServer_(tlsServer)
         , running_(false)
         , exitRequested_(false)
         , inputReady_(false)
@@ -80,6 +84,7 @@ private:
 private:
     UdpServer& server_;
     TcpServer* tcpServer_;  // nullptr이면 TCP 비활성
+    TlsServer* tlsServer_;  // nullptr이면 TLS 비활성
     
     // 스레드 제어
     std::atomic<bool> running_;
