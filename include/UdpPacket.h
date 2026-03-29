@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // 전송 프로토콜 타입
-enum class TransportType { UDP, TCP };
+enum class TransportType { UDP, TCP, TLS };
 
 struct UdpPacket 
 {

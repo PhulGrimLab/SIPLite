@@ -12,6 +12,20 @@ namespace
     constexpr char kRegisterAuthRealm[] = "SIPLite";
     constexpr auto kRegisterNonceTtl = std::chrono::minutes(5);
 
+    const char* transportToken(TransportType transport)
+    {
+        switch (transport)
+        {
+        case TransportType::TCP:
+            return "TCP";
+        case TransportType::TLS:
+            return "TLS";
+        case TransportType::UDP:
+        default:
+            return "UDP";
+        }
+    }
+
     std::string generateRegisterNonce()
     {
         static constexpr char hex[] = "0123456789abcdef";
@@ -1003,8 +1017,8 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     // 프록시 Via가 추가된 INVITE를 먼저 생성 — CANCEL/ACK 생성 시에도 동일한 Via가 필요
     // RFC 3261 §16.6 step 6: Request-URI를 callee의 Contact 주소로 변경
     std::string contactUri = extractUriFromHeader(regCopy.contact);
-    std::string fwdInvite = addProxyVia(pkt.data);
-    fwdInvite = addRecordRoute(fwdInvite);  // Record-Route 추가 — in-dialog 요청이 프록시를 경유하도록 보장
+    std::string fwdInvite = addProxyVia(pkt.data, pkt.transport);
+    fwdInvite = addRecordRoute(fwdInvite, pkt.transport);  // Record-Route 추가 — in-dialog 요청이 프록시를 경유하도록 보장
     fwdInvite = decrementMaxForwards(fwdInvite);  // RFC 3261 §16.6 step 3
     if (!contactUri.empty())
     {
@@ -1192,9 +1206,9 @@ bool SipCore::handleAck(const UdpPacket& pkt,
     if (sender_ && !ackFwdIp.empty())
     {
         // ACK에 프록시 Via 추가, Max-Forwards 감소, Route 제거 후 전달
-        std::string fwdAck = addProxyVia(pkt.data);
+        std::string fwdAck = addProxyVia(pkt.data, pkt.transport);
         fwdAck = decrementMaxForwards(fwdAck);
-        fwdAck = stripOwnRoute(fwdAck);
+        fwdAck = stripOwnRoute(fwdAck, pkt.transport);
         sender_(ackFwdIp, ackFwdPort, fwdAck);
     }
 
@@ -1361,9 +1375,9 @@ bool SipCore::handleBye(const UdpPacket& pkt,
         if (sender_ && !fwdIp.empty())
         {
             // BYE에 프록시 Via 추가, Max-Forwards 감소, Route 제거 후 전달
-            std::string fwdBye = addProxyVia(pkt.data);
+            std::string fwdBye = addProxyVia(pkt.data, pkt.transport);
             fwdBye = decrementMaxForwards(fwdBye);
-            fwdBye = stripOwnRoute(fwdBye);
+            fwdBye = stripOwnRoute(fwdBye, pkt.transport);
 
             // RFC 3261 §16.6: Request-URI를 상대방의 Contact URI로 재작성
             // 원래 BYE의 Request-URI가 상대방의 실제 Contact과 다를 수 있으므로
@@ -1583,9 +1597,9 @@ bool SipCore::handleMessage(const UdpPacket& pkt,
             // Dialog 락 해제 후 네트워크 전송은 아래에서 수행
             if (!fwdIp.empty() && sender_)
             {
-                std::string fwdMsg = addProxyVia(pkt.data);
+                std::string fwdMsg = addProxyVia(pkt.data, pkt.transport);
                 fwdMsg = decrementMaxForwards(fwdMsg);
-                fwdMsg = stripOwnRoute(fwdMsg);
+                fwdMsg = stripOwnRoute(fwdMsg, pkt.transport);
                 if (!fwdContactUri.empty())
                 {
                     fwdMsg = rewriteRequestUri(fwdMsg, fwdContactUri);
@@ -1642,7 +1656,7 @@ bool SipCore::handleMessage(const UdpPacket& pkt,
 
     // 수신자에게 MESSAGE 전달
     std::string contactUri = extractUriFromHeader(regCopy.contact);
-    std::string fwdMsg = addProxyVia(pkt.data);
+    std::string fwdMsg = addProxyVia(pkt.data, pkt.transport);
     fwdMsg = decrementMaxForwards(fwdMsg);
     if (!contactUri.empty())
     {
@@ -1943,7 +1957,7 @@ bool SipCore::handleNotify(const UdpPacket& pkt,
         && (pkt.remoteIp != subscriberIp || pkt.remotePort != subscriberPort))
     {
         // notifier에서 온 NOTIFY를 subscriber에게 전달
-        std::string fwdNotify = addProxyVia(pkt.data);
+        std::string fwdNotify = addProxyVia(pkt.data, pkt.transport);
         fwdNotify = decrementMaxForwards(fwdNotify);
         sender_(subscriberIp, subscriberPort, fwdNotify);
 
@@ -1982,7 +1996,7 @@ std::string SipCore::buildNotifyUnlocked_(const std::string& subKey,
     std::ostringstream oss;
     std::string targetUri = sub.contact.empty() ? sub.subscriberAor : sub.contact;
     oss << "NOTIFY " << targetUri << " SIP/2.0\r\n";
-    oss << "Via: SIP/2.0/UDP " << localAddr_ << ":" << localPort_
+    oss << "Via: SIP/2.0/UDP " << udpLocal_.ip << ":" << udpLocal_.port
         << ";branch=z9hG4bK-notify-" << subKey << "-" << notifyCSeq << "\r\n";
     oss << "From: <" << sub.targetAor << ">;tag=" << sub.toTag << "\r\n";
     oss << "To: <" << sub.subscriberAor << ">;tag=" << sub.fromTag << "\r\n";
@@ -2176,16 +2190,28 @@ std::string SipCore::decrementMaxForwards(const std::string& rawMsg) const
 // 프록시 Via 헤더 추가 (RFC 3261 §16.6)
 // INVITE를 callee에게 전달할 때, 프록시 자신의 Via를 최상단에 삽입하여
 // callee의 응답이 반드시 프록시를 경유하도록 보장한다.
-std::string SipCore::addProxyVia(const std::string& rawMsg) const
+std::string SipCore::addProxyVia(const std::string& rawMsg,
+                                 TransportType transport) const
 {
     auto pos = rawMsg.find("\r\n");
     if (pos == std::string::npos) return rawMsg;
 
     std::string branch = "z9hG4bK-proxy-" + generateTag();
-    std::string addr = localAddr_.empty() ? "127.0.0.1" : localAddr_;
-    uint16_t port = localPort_ ? localPort_ : 5060;
+    const TransportLocalAddress* local = &udpLocal_;
+    if (transport == TransportType::TCP)
+    {
+        local = &tcpLocal_;
+    }
+    else if (transport == TransportType::TLS)
+    {
+        local = &tlsLocal_;
+    }
 
-    std::string via = "Via: SIP/2.0/UDP " + addr + ":" + std::to_string(port)
+    std::string addr = local->ip.empty() ? "127.0.0.1" : local->ip;
+    uint16_t port = local->port ? local->port : 5060;
+
+    std::string via = std::string("Via: SIP/2.0/") + transportToken(transport) + " "
+                    + addr + ":" + std::to_string(port)
                     + ";branch=" + branch + ";rport";
 
     std::string result;
@@ -2238,16 +2264,39 @@ std::string SipCore::removeTopVia(const std::string& rawMsg) const
 // 이후 in-dialog 요청(ACK, BYE, re-INVITE 등)이 반드시 프록시를 경유하도록 보장한다.
 // Linphone 등 UA는 200 OK에 포함된 Record-Route를 Route Set으로 저장하여
 // 이후 요청에 Route 헤더로 추가한다.
-std::string SipCore::addRecordRoute(const std::string& rawMsg) const
+std::string SipCore::addRecordRoute(const std::string& rawMsg,
+                                    TransportType transport) const
 {
     auto pos = rawMsg.find("\r\n");
     if (pos == std::string::npos) return rawMsg;
 
-    std::string addr = localAddr_.empty() ? "127.0.0.1" : localAddr_;
-    uint16_t port = localPort_ ? localPort_ : 5060;
+    const TransportLocalAddress* local = &udpLocal_;
+    if (transport == TransportType::TCP)
+    {
+        local = &tcpLocal_;
+    }
+    else if (transport == TransportType::TLS)
+    {
+        local = &tlsLocal_;
+    }
+
+    std::string addr = local->ip.empty() ? "127.0.0.1" : local->ip;
+    uint16_t port = local->port ? local->port : 5060;
 
     // lr 파라미터: loose routing (RFC 3261 §16.6)
-    std::string rr = "Record-Route: <sip:" + addr + ":" + std::to_string(port) + ";lr>\r\n";
+    std::string rr;
+    if (transport == TransportType::TLS)
+    {
+        rr = "Record-Route: <sips:" + addr + ":" + std::to_string(port) + ";lr>\r\n";
+    }
+    else if (transport == TransportType::TCP)
+    {
+        rr = "Record-Route: <sip:" + addr + ":" + std::to_string(port) + ";transport=tcp;lr>\r\n";
+    }
+    else
+    {
+        rr = "Record-Route: <sip:" + addr + ":" + std::to_string(port) + ";lr>\r\n";
+    }
 
     std::string result;
     result.reserve(rawMsg.size() + rr.size());
@@ -2260,11 +2309,24 @@ std::string SipCore::addRecordRoute(const std::string& rawMsg) const
 // 자신을 가리키는 Route 헤더 제거 (loose routing 처리, RFC 3261 §16.4)
 // Linphone이 Route: <sip:proxy:port;lr>을 포함하여 보낸 ACK/BYE에서
 // 프록시 자신을 가리키는 Route 헤더를 제거한 후 다음 홉으로 전달한다.
-std::string SipCore::stripOwnRoute(const std::string& rawMsg) const
+std::string SipCore::stripOwnRoute(const std::string& rawMsg,
+                                   TransportType transport) const
 {
-    std::string addr = localAddr_.empty() ? "127.0.0.1" : localAddr_;
-    uint16_t port = localPort_ ? localPort_ : 5060;
+    const TransportLocalAddress* local = &udpLocal_;
+    if (transport == TransportType::TCP)
+    {
+        local = &tcpLocal_;
+    }
+    else if (transport == TransportType::TLS)
+    {
+        local = &tlsLocal_;
+    }
+
+    std::string addr = local->ip.empty() ? "127.0.0.1" : local->ip;
+    uint16_t port = local->port ? local->port : 5060;
     std::string selfUri = addr + ":" + std::to_string(port);
+    std::string selfSipRoute = "sip:" + selfUri;
+    std::string selfSipsRoute = "sips:" + selfUri;
 
     // Route 헤더 검색 (대소문자 무시)
     std::string lower = toLower(rawMsg);
@@ -2280,7 +2342,9 @@ std::string SipCore::stripOwnRoute(const std::string& rawMsg) const
         if (lineEnd == std::string::npos) break;
 
         std::string line = rawMsg.substr(pos, lineEnd - pos);
-        if (line.find(selfUri) != std::string::npos)
+        if (line.find(selfUri) != std::string::npos ||
+            line.find(selfSipRoute) != std::string::npos ||
+            line.find(selfSipsRoute) != std::string::npos)
         {
             // 이 Route 라인 제거
             std::string result;

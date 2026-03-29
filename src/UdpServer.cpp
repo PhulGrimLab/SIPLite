@@ -169,6 +169,8 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
         }
     }
     sipCore_.setLocalAddress(localIp, port);
+    sipCore_.setLocalAddressForTransport(TransportType::UDP, localIp, port);
+    sipCore_.setLocalAddressForTransport(TransportType::TCP, localIp, port);
     Logger::instance().info("[UdpServer] Proxy local address: " + localIp + ":" + std::to_string(port));
 
     // 수신 스레드 시작

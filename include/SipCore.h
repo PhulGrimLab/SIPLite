@@ -1015,16 +1015,19 @@ private:
     std::string decrementMaxForwards(const std::string& rawMsg) const;
 
     // 프록시 Via 헤더 관리 (RFC 3261 §16.6/§16.7)
-    std::string addProxyVia(const std::string& rawMsg) const;
+    std::string addProxyVia(const std::string& rawMsg,
+                            TransportType transport = TransportType::UDP) const;
     std::string removeTopVia(const std::string& rawMsg) const;
 
     // Record-Route 헤더 추가 (RFC 3261 §16.6 step 4)
     // 프록시가 INVITE를 전달할 때 Record-Route를 추가하여,
     // 이후 in-dialog 요청(ACK, BYE, re-INVITE)이 프록시를 경유하도록 보장
-    std::string addRecordRoute(const std::string& rawMsg) const;
+    std::string addRecordRoute(const std::string& rawMsg,
+                               TransportType transport = TransportType::UDP) const;
 
     // 자신을 가리키는 Route 헤더 제거 (loose routing, RFC 3261 §16.4)
-    std::string stripOwnRoute(const std::string& rawMsg) const;
+    std::string stripOwnRoute(const std::string& rawMsg,
+                              TransportType transport = TransportType::UDP) const;
 
     // Request-URI 재작성 (RFC 3261 §16.6 step 6)
     // 프록시가 INVITE를 callee에게 전달할 때, Request-URI를 callee의 Contact 주소로 변경
@@ -1138,15 +1141,47 @@ private:
     // Sender callback (set by UdpServer)
     SenderFn sender_;
 
-    // 프록시 로컬 주소 정보 (Via 헤더 생성용)
-    std::string localAddr_ = "127.0.0.1";
-    uint16_t localPort_ = 5060;
+    struct TransportLocalAddress
+    {
+        std::string ip = "127.0.0.1";
+        uint16_t port = 5060;
+    };
+
+    // 프록시 로컬 주소 정보 (transport별 Via/Record-Route 생성용)
+    TransportLocalAddress udpLocal_;
+    TransportLocalAddress tcpLocal_;
+    TransportLocalAddress tlsLocal_;
 
 public:
     // 프록시 로컬 주소 설정
     void setLocalAddress(const std::string& ip, uint16_t port)
     {
-        localAddr_ = ip;
-        localPort_ = port;
+        udpLocal_.ip = ip;
+        udpLocal_.port = port;
+        tcpLocal_.ip = ip;
+        tcpLocal_.port = port;
+        tlsLocal_.ip = ip;
+        tlsLocal_.port = static_cast<uint16_t>(port + 1);
+    }
+
+    void setLocalAddressForTransport(TransportType transport,
+                                     const std::string& ip,
+                                     uint16_t port)
+    {
+        TransportLocalAddress* target = &udpLocal_;
+        if (transport == TransportType::TCP)
+        {
+            target = &tcpLocal_;
+        }
+        else if (transport == TransportType::TLS)
+        {
+            target = &tlsLocal_;
+        }
+
+        if (!ip.empty() && ip != "0.0.0.0")
+        {
+            target->ip = ip;
+        }
+        target->port = port;
     }
 };

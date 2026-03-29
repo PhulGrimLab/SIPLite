@@ -1,7 +1,9 @@
 # 컴파일러 설정
 CXX = g++
-CXXFLAGS = -Wall -Wextra -std=c++17 -g -I./include -pthread
-LDFLAGS = -pthread
+OPENSSL_CFLAGS := $(shell pkg-config --cflags openssl 2>/dev/null)
+OPENSSL_LIBS := $(shell pkg-config --libs openssl 2>/dev/null)
+CXXFLAGS = -Wall -Wextra -std=c++17 -g -I./include -pthread $(OPENSSL_CFLAGS)
+LDFLAGS = -pthread $(OPENSSL_LIBS)
 
 # 디렉토리 설정
 SRC_DIR = src

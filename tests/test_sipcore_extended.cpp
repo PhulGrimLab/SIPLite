@@ -1135,6 +1135,48 @@ void test_mixed_transport_ack_and_bye()
     PASS();
 }
 
+void test_tls_transport_headers_on_forward()
+{
+    TEST("TLS INVITE forwarding uses TLS Via and SIPS Record-Route");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+    core->setLocalAddress("192.0.2.10", 5060);
+    core->setLocalAddressForTransport(TransportType::TLS, "192.0.2.10", 5061);
+
+    preRegisterAndLogin(*core, sent, "sip:1001@server", "<sip:1001@10.0.0.1:5060>",
+                        "10.0.0.1", 5060, "tls-hdr-reg");
+    sent.clear();
+
+    std::string invRaw = makeInvite("sip:1001@server", "sip:1002@client", "tls-hdr-call", 1, "tls-tag");
+    SipMessage msg;
+    assert(parseSipMessage(invRaw, msg));
+    UdpPacket invPkt{"10.0.0.2", 5062, invRaw};
+    invPkt.transport = TransportType::TLS;
+    std::string resp;
+    core->handlePacket(invPkt, msg, resp);
+
+    bool foundTlsVia = false;
+    bool foundSipsRecordRoute = false;
+    for (const auto& m : sent)
+    {
+        if (m.ip == "10.0.0.1" && m.port == 5060 && m.data.find("INVITE ") == 0)
+        {
+            if (m.data.find("Via: SIP/2.0/TLS 192.0.2.10:5061") != std::string::npos)
+            {
+                foundTlsVia = true;
+            }
+            if (m.data.find("Record-Route: <sips:192.0.2.10:5061;lr>") != std::string::npos)
+            {
+                foundSipsRecordRoute = true;
+            }
+        }
+    }
+
+    assert(foundTlsVia);
+    assert(foundSipsRecordRoute);
+    PASS();
+}
+
 // ================================
 // 23) 지원하지 않는 메서드 → 501
 // ================================
@@ -2632,6 +2674,7 @@ int main()
     test_invite_retransmission_detection();
     test_timer_c_invite_timeout();
     test_timer_c_reset_on_provisional();
+    test_tls_transport_headers_on_forward();
 
     std::cout << "\n[Section 3] BYE\n";
     test_bye_terminates_call();

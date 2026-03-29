@@ -1,5 +1,6 @@
 #include "UdpServer.h"
 #include "TcpServer.h"
+#include "TlsServer.h"
 #include "UdpPacket.h"
 #include "XmlConfigLoader.h"
 #include "ConsoleInterface.h"
@@ -134,10 +135,62 @@ int main(int argc, char* argv[])
         std::cout << "[서버] TCP 서버 실행 중 (포트: " << bindPort << ")\n";
     }
 
+    TlsServer tlsServer(udpServer.sipCore());
+    bool tlsStarted = false;
+    const char* tlsEnableEnv = std::getenv("SIPLITE_TLS_ENABLE");
+    const bool tlsEnabled = (tlsEnableEnv != nullptr) &&
+        (std::string(tlsEnableEnv) == "1" || std::string(tlsEnableEnv) == "true");
+    if (tlsEnabled)
+    {
+        uint16_t tlsPort = 5061;
+        if (const char* tlsPortEnv = std::getenv("SIPLITE_TLS_PORT"))
+        {
+            try
+            {
+                int parsed = std::stoi(tlsPortEnv);
+                if (parsed > 0 && parsed <= 65535)
+                {
+                    tlsPort = static_cast<uint16_t>(parsed);
+                }
+            }
+            catch (...)
+            {
+                Logger::instance().error("[경고] SIPLITE_TLS_PORT 값이 잘못되어 기본값 5061 사용");
+            }
+        }
+
+        const char* certFile = std::getenv("SIPLITE_TLS_CERT_FILE");
+        const char* keyFile = std::getenv("SIPLITE_TLS_KEY_FILE");
+        if (certFile != nullptr && keyFile != nullptr &&
+            std::strlen(certFile) > 0 && std::strlen(keyFile) > 0)
+        {
+            tlsStarted = tlsServer.start(bindIp, tlsPort, workerCount, certFile, keyFile);
+            if (!tlsStarted)
+            {
+                Logger::instance().error("[경고] TLS 서버 시작 실패 (UDP/TCP만 사용)");
+                std::cerr << "[경고] TLS 서버 시작 실패 (UDP/TCP만 사용)\n";
+            }
+            else
+            {
+                udpServer.sipCore().setLocalAddressForTransport(TransportType::TLS, bindIp, tlsPort);
+                std::cout << "[서버] TLS 서버 실행 중 (포트: " << tlsPort << ")\n";
+            }
+        }
+        else
+        {
+            Logger::instance().error("[경고] TLS 활성화 요청이 있었지만 인증서/키 경로가 없음");
+            std::cerr << "[경고] TLS 활성화 요청이 있었지만 인증서/키 경로가 없음\n";
+        }
+    }
+
     // 전송 프로토콜 라우팅 콜백 설정
-    // TCP 연결이 있으면 TCP로, 없으면 UDP로 전송
+    // TLS 연결이 있으면 TLS로, 없으면 TCP, 마지막으로 UDP로 전송
     udpServer.sipCore().setSender(
-        [&udpServer, &tcpServer](const std::string& ip, uint16_t port, const std::string& data) -> bool {
+        [&udpServer, &tcpServer, &tlsServer, &tlsStarted](const std::string& ip, uint16_t port, const std::string& data) -> bool {
+            if (tlsStarted && tlsServer.hasConnection(ip, port))
+            {
+                return tlsServer.sendTo(ip, port, data);
+            }
             if (tcpServer.hasConnection(ip, port))
             {
                 return tcpServer.sendTo(ip, port, data);
@@ -193,6 +246,10 @@ int main(int argc, char* argv[])
     Logger::instance().info("[서버] 종료 중...");
     
     console.stop();
+    if (tlsStarted)
+    {
+        tlsServer.stop();
+    }
     tcpServer.stop();
     udpServer.stop();
     
