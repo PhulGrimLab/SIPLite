@@ -26,6 +26,7 @@ struct TerminalConfig
     std::string ip;
     uint16_t port = 5060;
     int expiresSec = 3600;
+    std::string password;
     std::string description;
 };
 
@@ -133,6 +134,7 @@ public:
             config.aor = extractTag(terminalBlock, "aor");
             config.contact = extractTag(terminalBlock, "contact");
             config.ip = extractTag(terminalBlock, "ip");
+            config.password = extractTag(terminalBlock, "password");
             config.description = extractTag(terminalBlock, "description");
             
             // IP 주소 검증 (선택적 - 비어있으면 로그인 시 실제 패킷에서 설정됨)
@@ -202,7 +204,8 @@ public:
         for (const auto& term : terminals)
         {
             if (sipCore.registerTerminal(term.aor, term.contact, 
-                                          term.ip, term.port, term.expiresSec))
+                                          term.ip, term.port, term.expiresSec,
+                                          term.password))
             {
                 ++count;
                 std::cout << "  - 등록: " << sanitizeForDisplay(term.aor, 100, '?', false);

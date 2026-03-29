@@ -5,6 +5,157 @@
 #include <sstream>
 #include <algorithm>
 #include <charconv>
+#include <map>
+
+namespace
+{
+    constexpr char kRegisterAuthRealm[] = "SIPLite";
+    constexpr auto kRegisterNonceTtl = std::chrono::minutes(5);
+
+    std::string generateRegisterNonce()
+    {
+        static constexpr char hex[] = "0123456789abcdef";
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<int> dist(0, 15);
+
+        std::string nonce;
+        nonce.reserve(32);
+        for (int i = 0; i < 32; ++i)
+        {
+            nonce.push_back(hex[dist(gen)]);
+        }
+        return nonce;
+    }
+
+    std::map<std::string, std::string> parseDigestParameters(const std::string& header)
+    {
+        std::map<std::string, std::string> params;
+        std::string value = trim(header);
+        if (value.size() < 6 || toLower(value.substr(0, 6)) != "digest")
+        {
+            return params;
+        }
+
+        std::size_t pos = 6;
+        while (pos < value.size())
+        {
+            while (pos < value.size() &&
+                   (std::isspace(static_cast<unsigned char>(value[pos])) || value[pos] == ','))
+            {
+                ++pos;
+            }
+            if (pos >= value.size())
+            {
+                break;
+            }
+
+            std::size_t eq = value.find('=', pos);
+            if (eq == std::string::npos)
+            {
+                break;
+            }
+
+            std::string key = toLower(trim(value.substr(pos, eq - pos)));
+            pos = eq + 1;
+
+            std::string val;
+            if (pos < value.size() && value[pos] == '"')
+            {
+                ++pos;
+                while (pos < value.size())
+                {
+                    char ch = value[pos];
+                    if (ch == '\\' && pos + 1 < value.size())
+                    {
+                        val.push_back(value[pos + 1]);
+                        pos += 2;
+                        continue;
+                    }
+                    if (ch == '"')
+                    {
+                        ++pos;
+                        break;
+                    }
+                    val.push_back(ch);
+                    ++pos;
+                }
+            }
+            else
+            {
+                std::size_t comma = value.find(',', pos);
+                if (comma == std::string::npos)
+                {
+                    val = trim(value.substr(pos));
+                    pos = value.size();
+                }
+                else
+                {
+                    val = trim(value.substr(pos, comma - pos));
+                    pos = comma + 1;
+                }
+            }
+
+            if (!key.empty())
+            {
+                params[key] = val;
+            }
+        }
+
+        return params;
+    }
+
+    bool parseNonceCount(const std::string& nc, std::uint32_t& outNc)
+    {
+        if (nc.empty() || nc.size() > 8)
+        {
+            return false;
+        }
+
+        outNc = 0;
+        for (char ch : nc)
+        {
+            outNc <<= 4U;
+            if (ch >= '0' && ch <= '9')
+            {
+                outNc |= static_cast<std::uint32_t>(ch - '0');
+            }
+            else if (ch >= 'a' && ch <= 'f')
+            {
+                outNc |= static_cast<std::uint32_t>(ch - 'a' + 10);
+            }
+            else if (ch >= 'A' && ch <= 'F')
+            {
+                outNc |= static_cast<std::uint32_t>(ch - 'A' + 10);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    std::string makeDigestResponse(const std::string& username,
+                                   const std::string& realm,
+                                   const std::string& password,
+                                   const std::string& method,
+                                   const std::string& uri,
+                                   const std::string& nonce,
+                                   const std::string& nc,
+                                   const std::string& cnonce,
+                                   const std::string& qop)
+    {
+        const std::string ha1 = md5Hex(username + ":" + realm + ":" + password);
+        const std::string ha2 = md5Hex(method + ":" + uri);
+        if (!qop.empty())
+        {
+            return md5Hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2);
+        }
+        return md5Hex(ha1 + ":" + nonce + ":" + ha2);
+    }
+}
 
 bool SipCore::handlePacket(const UdpPacket& pkt,
                            const SipMessage& msg,
@@ -469,6 +620,7 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
 
     // XML에 등록된 단말만 REGISTER 허용 (사용자 ID로 매칭)
     std::string matchedAor;
+    Registration staticReg;
     {
         std::lock_guard<std::mutex> lock(regMutex_);
         auto it = findByUser_(aor);
@@ -483,6 +635,139 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
             return true;
         }
         matchedAor = it->first;
+        staticReg = it->second;
+    }
+
+    if (!staticReg.authPassword.empty())
+    {
+        const std::string authHdr = sanitizeHeaderValue(getHeader(msg, "authorization"));
+        const auto authParams = parseDigestParameters(authHdr);
+        bool staleNonce = false;
+        bool authorized = false;
+
+        if (!authParams.empty())
+        {
+            const auto usernameIt = authParams.find("username");
+            const auto realmIt = authParams.find("realm");
+            const auto nonceIt = authParams.find("nonce");
+            const auto uriIt = authParams.find("uri");
+            const auto responseIt = authParams.find("response");
+            const auto qopIt = authParams.find("qop");
+            const auto ncIt = authParams.find("nc");
+            const auto cnonceIt = authParams.find("cnonce");
+            const auto algorithmIt = authParams.find("algorithm");
+
+            if (usernameIt != authParams.end() &&
+                realmIt != authParams.end() &&
+                nonceIt != authParams.end() &&
+                uriIt != authParams.end() &&
+                responseIt != authParams.end())
+            {
+                const std::string expectedUser = extractUserFromUri(matchedAor);
+                const std::string realm = realmIt->second;
+                const std::string qop = (qopIt != authParams.end()) ? toLower(qopIt->second) : "";
+                const std::string nc = (ncIt != authParams.end()) ? ncIt->second : "";
+                const std::string cnonce = (cnonceIt != authParams.end()) ? cnonceIt->second : "";
+                const bool algorithmOk = (algorithmIt == authParams.end()) ||
+                                         toLower(algorithmIt->second) == "md5";
+
+                if (usernameIt->second == expectedUser &&
+                    realm == kRegisterAuthRealm &&
+                    algorithmOk &&
+                    (qop.empty() || qop == "auth") &&
+                    uriIt->second == msg.requestUri)
+                {
+                    bool nonceOk = false;
+                    std::uint32_t parsedNc = 0;
+                    bool hasParsedNc = false;
+                    if (qop.empty())
+                    {
+                        std::lock_guard<std::mutex> authLock(authMutex_);
+                        auto nonceState = registerNonces_.find(nonceIt->second);
+                        if (nonceState != registerNonces_.end() &&
+                            nonceState->second.expiresAt > std::chrono::steady_clock::now())
+                        {
+                            nonceOk = true;
+                        }
+                        else if (nonceState != registerNonces_.end())
+                        {
+                            registerNonces_.erase(nonceState);
+                            staleNonce = true;
+                        }
+                    }
+                    else if (!nc.empty() && !cnonce.empty())
+                    {
+                        if (parseNonceCount(nc, parsedNc))
+                        {
+                            hasParsedNc = true;
+                            std::lock_guard<std::mutex> authLock(authMutex_);
+                            auto nonceState = registerNonces_.find(nonceIt->second);
+                            if (nonceState != registerNonces_.end() &&
+                                nonceState->second.expiresAt > std::chrono::steady_clock::now())
+                            {
+                                nonceOk = parsedNc > nonceState->second.lastNonceCount;
+                            }
+                            else if (nonceState != registerNonces_.end())
+                            {
+                                registerNonces_.erase(nonceState);
+                                staleNonce = true;
+                            }
+                        }
+                    }
+
+                    if (nonceOk)
+                    {
+                        const std::string expectedResponse = makeDigestResponse(
+                            expectedUser,
+                            kRegisterAuthRealm,
+                            staticReg.authPassword,
+                            "REGISTER",
+                            uriIt->second,
+                            nonceIt->second,
+                            nc,
+                            cnonce,
+                            qop);
+                        authorized = toLower(responseIt->second) == expectedResponse;
+                        if (authorized && hasParsedNc)
+                        {
+                            std::lock_guard<std::mutex> authLock(authMutex_);
+                            auto nonceState = registerNonces_.find(nonceIt->second);
+                            if (nonceState != registerNonces_.end() &&
+                                parsedNc > nonceState->second.lastNonceCount)
+                            {
+                                nonceState->second.lastNonceCount = parsedNc;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!authorized)
+        {
+            std::string nonce = generateRegisterNonce();
+            {
+                std::lock_guard<std::mutex> authLock(authMutex_);
+                const auto now = std::chrono::steady_clock::now();
+                for (auto it = registerNonces_.begin(); it != registerNonces_.end();)
+                {
+                    if (it->second.expiresAt <= now)
+                    {
+                        it = registerNonces_.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+                registerNonces_[nonce] = {
+                    std::chrono::steady_clock::now() + kRegisterNonceTtl,
+                    0
+                };
+            }
+            outResponse = buildRegisterAuthChallenge(msg, nonce, staleNonce);
+            return true;
+        }
     }
 
     // Expires 헤더 또는 Contact 헤더의 expires 파라미터에서 유효 시간(TTL)을 추출하여 등록의 만료 시점을 계산한다.
@@ -2248,6 +2533,39 @@ std::string SipCore::buildRegisterOk(const SipMessage& req)
     if (!cseq.empty())    oss << "CSeq: "    << cseq                << "\r\n";
     if (!contact.empty()) oss << "Contact: " << contact             << "\r\n";
 
+    oss << "Server: SIPLite/0.1\r\n";
+    oss << "Content-Length: 0\r\n";
+    oss << "\r\n";
+    return oss.str();
+}
+
+std::string SipCore::buildRegisterAuthChallenge(const SipMessage& req,
+                                                const std::string& nonce,
+                                                bool stale)
+{
+    std::ostringstream oss;
+    oss << "SIP/2.0 401 Unauthorized\r\n";
+
+    std::string via    = sanitizeHeaderValue(getHeader(req, "via"));
+    std::string from   = sanitizeHeaderValue(getHeader(req, "from"));
+    std::string to     = sanitizeHeaderValue(getHeader(req, "to"));
+    std::string callId = sanitizeHeaderValue(getHeader(req, "call-id"));
+    std::string cseq   = sanitizeHeaderValue(getHeader(req, "cseq"));
+
+    if (!via.empty())    oss << "Via: " << via << "\r\n";
+    if (!from.empty())   oss << "From: " << from << "\r\n";
+    if (!to.empty())     oss << "To: " << ensureToTag(to) << "\r\n";
+    if (!callId.empty()) oss << "Call-ID: " << callId << "\r\n";
+    if (!cseq.empty())   oss << "CSeq: " << cseq << "\r\n";
+
+    oss << "WWW-Authenticate: Digest realm=\"" << kRegisterAuthRealm
+        << "\", nonce=\"" << nonce
+        << "\", algorithm=MD5, qop=\"auth\"";
+    if (stale)
+    {
+        oss << ", stale=true";
+    }
+    oss << "\r\n";
     oss << "Server: SIPLite/0.1\r\n";
     oss << "Content-Length: 0\r\n";
     oss << "\r\n";

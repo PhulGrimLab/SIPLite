@@ -1,10 +1,25 @@
 #include "SipCore.h"
 #include "SipParser.h"
+#include "SipUtils.h"
 #include <cassert>
 #include <iostream>
 #include <vector>
 
 struct SentMsg { std::string ip; uint16_t port; std::string data; };
+
+namespace
+{
+std::string extractChallengeValue(const std::string& response, const std::string& key)
+{
+    std::string pattern = key + "=\"";
+    std::size_t start = response.find(pattern);
+    assert(start != std::string::npos);
+    start += pattern.size();
+    std::size_t end = response.find('"', start);
+    assert(end != std::string::npos);
+    return response.substr(start, end - start);
+}
+}
 
 int main()
 {
@@ -49,6 +64,70 @@ int main()
     }
 
     std::cout << "REGISTER flow test passed\n";
+
+    // 1-2) REGISTER with Digest auth challenge/response
+    SipCore authCore;
+    authCore.registerTerminal("sip:2001@server", "<sip:2001@10.0.0.9:5060>",
+                              "10.0.0.9", 5060, 3600, "s3cret");
+
+    std::string authReq1 =
+        "REGISTER sip:server SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP auth.example.com:5062\r\n"
+        "From: <sip:2001@server>;tag=auth1\r\n"
+        "To: <sip:2001@server>\r\n"
+        "Call-ID: reg-auth-1\r\n"
+        "CSeq: 1 REGISTER\r\n"
+        "Contact: <sip:2001@10.0.0.9:5060>\r\n"
+        "Expires: 3600\r\n"
+        "Content-Length: 0\r\n\r\n";
+
+    SipMessage authMsg1;
+    assert(parseSipMessage(authReq1, authMsg1));
+    UdpPacket authPkt1{"10.0.0.9", 5060, authReq1};
+
+    ok = authCore.handlePacket(authPkt1, authMsg1, resp);
+    assert(ok);
+    assert(resp.find("401 Unauthorized") != std::string::npos);
+    assert(resp.find("WWW-Authenticate: Digest") != std::string::npos);
+
+    const std::string nonce = extractChallengeValue(resp, "nonce");
+    const std::string realm = extractChallengeValue(resp, "realm");
+    const std::string cnonce = "abcdef1234567890";
+    const std::string nc = "00000001";
+    const std::string uri = "sip:server";
+    const std::string response = md5Hex(
+        md5Hex("2001:" + realm + ":s3cret") + ":" + nonce + ":" + nc + ":" + cnonce + ":auth:" +
+        md5Hex("REGISTER:" + uri));
+
+    std::string authReq2 =
+        "REGISTER sip:server SIP/2.0\r\n"
+        "Via: SIP/2.0/UDP auth.example.com:5062\r\n"
+        "From: <sip:2001@server>;tag=auth1\r\n"
+        "To: <sip:2001@server>\r\n"
+        "Call-ID: reg-auth-1\r\n"
+        "CSeq: 2 REGISTER\r\n"
+        "Contact: <sip:2001@10.0.0.9:5060>\r\n"
+        "Authorization: Digest username=\"2001\", realm=\"" + realm +
+        "\", nonce=\"" + nonce +
+        "\", uri=\"" + uri +
+        "\", response=\"" + response +
+        "\", algorithm=MD5, qop=auth, nc=" + nc +
+        ", cnonce=\"" + cnonce + "\"\r\n"
+        "Expires: 3600\r\n"
+        "Content-Length: 0\r\n\r\n";
+
+    SipMessage authMsg2;
+    assert(parseSipMessage(authReq2, authMsg2));
+    UdpPacket authPkt2{"10.0.0.9", 5060, authReq2};
+
+    ok = authCore.handlePacket(authPkt2, authMsg2, resp);
+    assert(ok);
+    assert(resp.find("200 OK") != std::string::npos);
+    auto authReg = authCore.findRegistrationSafe("sip:2001@server");
+    assert(authReg.has_value());
+    assert(authReg->loggedIn);
+
+    std::cout << "REGISTER digest auth test passed\n";
 
     // 2) INVITE from caller 10.0.0.2 to 1001@server
     sent.clear();

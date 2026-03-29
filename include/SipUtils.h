@@ -37,3 +37,6 @@ std::string sanitizeForDisplay(const std::string& input,
 
 // Helper to ensure To header has tag
 std::string ensureToTag(const std::string& to);
+
+// Digest authentication helper
+std::string md5Hex(const std::string& input);

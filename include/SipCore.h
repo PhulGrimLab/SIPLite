@@ -18,6 +18,7 @@
 #include <thread>      // for std::this_thread::get_id()
 #include <charconv>    // for std::from_chars
 #include <limits>      // for std::numeric_limits
+#include <cstdint>
 
 // ================================
 // 0) 보안 상수 정의
@@ -133,6 +134,7 @@ struct Registration
     std::string contact;    // "sip:1001@client-ip:port"
     std::string ip;         // 실제 패킷 src IP
     uint16_t    port = 0;   // 실제 패킷 src Port
+    std::string authPassword; // REGISTER Digest 검증용 평문 비밀번호
 
     /* 만료시간 변수 설명 📅
     **std::chrono::steady_clock::time_point expiresAt;**는 지속적(모노토닉) 시계인 steady_clock 상의 특정 시점을 저장하는 변수입니다. 주로 타임아웃·만료 시각을 안전하게 표현할 때 씁니다.
@@ -841,7 +843,8 @@ public:
                           const std::string& contact,
                           const std::string& ip,
                           uint16_t port,
-                          int expiresSec = SipConstants::DEFAULT_EXPIRES_SEC)
+                          int expiresSec = SipConstants::DEFAULT_EXPIRES_SEC,
+                          const std::string& authPassword = "")
     {
         if (aor.empty())
         {
@@ -863,6 +866,7 @@ public:
         reg.contact = contact.empty() ? aor : contact;
         reg.ip = ip;
         reg.port = port;
+        reg.authPassword = authPassword;
         reg.expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(expiresSec);
         reg.isStatic = true;  // XML 설정으로 등록된 단말
 
@@ -1044,10 +1048,21 @@ private:
                                     const std::string& reason);
 
     std::string buildRegisterOk(const SipMessage& req);
+    std::string buildRegisterAuthChallenge(const SipMessage& req,
+                                           const std::string& nonce,
+                                           bool stale);
 
 private:
+    struct DigestNonceState
+    {
+        std::chrono::steady_clock::time_point expiresAt;
+        std::uint32_t lastNonceCount = 0;
+    };
+
     mutable std::mutex regMutex_;
     std::map<std::string, Registration> regs_;
+    mutable std::mutex authMutex_;
+    std::unordered_map<std::string, DigestNonceState> registerNonces_;
 
     // AOR의 사용자 부분(user part)으로 regs_ 검색 (regMutex_ 홀드 상태에서 호출)
     std::map<std::string, Registration>::iterator findByUser_(const std::string& aor)
