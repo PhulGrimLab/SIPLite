@@ -5,6 +5,10 @@ OPENSSL_LIBS := $(shell pkg-config --libs openssl 2>/dev/null)
 CXXFLAGS = -Wall -Wextra -std=c++17 -g -I./include -pthread $(OPENSSL_CFLAGS)
 LDFLAGS = -pthread $(OPENSSL_LIBS)
 
+ifeq ($(wildcard /usr/include/openssl/err.h),)
+$(error OpenSSL development headers not found. Install libssl-dev, then rebuild)
+endif
+
 # 디렉토리 설정
 SRC_DIR = src
 BUILD_DIR = build
