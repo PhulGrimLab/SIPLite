@@ -16,6 +16,13 @@
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
 
+struct TlsVerifyConfig
+{
+    bool verifyPeer = false;          // outbound peer cert chain verification
+    bool requireClientCert = false;   // inbound client certificate requirement
+    std::string caFile;
+};
+
 struct TlsConnection
 {
     int fd = -1;
@@ -51,6 +58,7 @@ public:
 
 private:
     bool initializeSsl(const std::string& certFile, const std::string& keyFile);
+    bool configureVerification();
     void cleanupSsl();
     bool bindSocket(const std::string& ip, uint16_t port);
     void recvLoop();
@@ -83,6 +91,7 @@ private:
     SipCore& sipCore_;
     SSL_CTX* serverCtx_ = nullptr;
     SSL_CTX* clientCtx_ = nullptr;
+    TlsVerifyConfig verifyConfig_;
     std::string bindIp_;
     uint16_t bindPort_ = 0;
 

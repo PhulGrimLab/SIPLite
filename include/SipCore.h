@@ -741,7 +741,7 @@ public:
         auto now = std::chrono::steady_clock::now();
         for (const auto& [key, sub] : subscriptions_)
         {
-            if (extractUserFromUri(sub.targetAor) == extractUserFromUri(targetAor)
+            if (extractAorKeyFromUri(sub.targetAor) == extractAorKeyFromUri(targetAor)
                 && sub.state != Subscription::State::TERMINATED
                 && sub.expiresAt > now)
             {
@@ -763,14 +763,14 @@ public:
             TransportType transport = TransportType::UDP;
         };
         std::vector<PendingNotify> toSend;
-        std::string user = extractUserFromUri(aor);
+        const std::string aorKey = extractAorKeyFromUri(aor);
 
         {
             std::lock_guard<std::mutex> lock(subMutex_);
             auto now = std::chrono::steady_clock::now();
             for (auto& [key, sub] : subscriptions_)
             {
-                if (extractUserFromUri(sub.targetAor) == user
+                if (extractAorKeyFromUri(sub.targetAor) == aorKey
                     && sub.state == Subscription::State::ACTIVE
                     && sub.expiresAt > now)
                 {
@@ -1096,14 +1096,14 @@ private:
     mutable std::mutex authMutex_;
     std::unordered_map<std::string, DigestNonceState> registerNonces_;
 
-    // AOR의 사용자 부분(user part)으로 regs_ 검색 (regMutex_ 홀드 상태에서 호출)
+    // 정규화된 AoR 키(user@domain)로 regs_ 검색 (regMutex_ 홀드 상태에서 호출)
     std::map<std::string, Registration>::iterator findByUser_(const std::string& aor)
     {
-        std::string user = extractUserFromUri(aor);
-        if (user.empty()) return regs_.end();
+        const std::string aorKey = extractAorKeyFromUri(aor);
+        if (aorKey.empty()) return regs_.end();
         for (auto it = regs_.begin(); it != regs_.end(); ++it)
         {
-            if (extractUserFromUri(it->first) == user)
+            if (extractAorKeyFromUri(it->first) == aorKey)
                 return it;
         }
         return regs_.end();

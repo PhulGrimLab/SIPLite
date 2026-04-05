@@ -49,8 +49,50 @@ TLS가 "코드가 존재하는 수준"인지, 아니면 실제 SIP 라우팅에 
   - TLS: `sips:server@IP:PORT`
   형식으로 Contact를 생성하도록 보완
 
+## 2026-04-05 AoR 조회 보완
+
+- 등록 조회 로직을 `user` 단독 비교에서 정규화된 `user@domain` 비교로 변경
+- 같은 user라도 domain이 다르면 서로 다른 등록으로 취급하도록 수정
+- `INVITE`/`MESSAGE`의 등록 조회뿐 아니라 구독 대상 조회와 `notifySubscribers()`도 같은 AoR 기준으로 통일
+- 멀티도메인 회귀 테스트 추가:
+  - `sip:1001@alpha.example`
+  - `sip:1001@beta.example`
+  가 동시에 존재할 때 목적지 domain에 맞는 단말로 라우팅되는지 확인
+- 존재하지 않는 domain은 같은 user가 다른 domain에 있어도 `404 Not Found`가 유지되는지 확인
+
+## 2026-04-05 TLS 검증 정책 보완
+
+- `TlsServer`에 환경변수 기반 TLS 검증 정책 추가
+- 새 환경변수:
+  - `SIPLITE_TLS_VERIFY_PEER=0|1`
+  - `SIPLITE_TLS_CA_FILE=/path/to/ca.pem`
+  - `SIPLITE_TLS_REQUIRE_CLIENT_CERT=0|1`
+- outbound TLS는 `verify peer`가 켜진 경우 CA 파일 또는 시스템 CA store 기반으로 certificate chain 검증 수행
+- inbound TLS는 `require client cert`가 켜진 경우 client certificate를 필수로 요구
+- 기본값은 기존 호환성을 위해 느슨한 정책 유지:
+  - peer verify `off`
+  - client cert requirement `off`
+- 현재 한계도 문서에 명시:
+  - hostname verification은 아직 미구현
+- `scripts/start_tls.sh`도 새 환경변수를 전달하고 실행 시 표시하도록 갱신
+
+## 2026-04-05 TLS 기본 실행 경로 정리
+
+- `make run`이 기본적으로 TLS 실행 경로를 타도록 변경
+- 평문 실행은 `make run_plain`으로 분리
+- `scripts/start_tls.sh`가 인증서 파일 부재 시 바로 실패하지 않고 `scripts/ensure_tls_certs.sh`를 통해 self-signed 인증서를 자동 생성
+- 기본 자동 생성 값:
+  - `CN=127.0.0.1`
+  - `SAN IP=127.0.0.1`
+  - `SAN DNS=localhost`
+- 필요 시 환경변수로 인증서 subject/SAN을 조정 가능:
+  - `SIPLITE_TLS_CERT_CN`
+  - `SIPLITE_TLS_CERT_SAN_IP`
+  - `SIPLITE_TLS_CERT_SAN_DNS`
+  - `SIPLITE_TLS_CERT_DAYS`
+- 결과적으로 개발 환경에서는 `make all && make run`만으로 TLS 리스너가 바로 올라오는 흐름 확보
+
 ## 별도 확인 필요 항목
 
-- `buildInviteResponse()`의 `Contact`는 아직 `sip:server@0.0.0.0:5060` 고정 값이므로 추후 transport-aware 보완 필요
-- TLS 클라이언트 인증서 검증은 아직 `SSL_VERIFY_NONE` 상태
-- 메인 루프에 `cleanupExpiredSubscriptions()` 연결은 여전히 필요
+- hostname verification 미구현
+- Linphone 실제 TLS 등록/호 설정/종료 상호운용 검증 필요

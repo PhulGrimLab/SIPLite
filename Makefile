@@ -118,8 +118,13 @@ release: LDFLAGS += -s -pthread
 release: all
 
 # 실행
-run: all
+run: run_tls
+
+run_plain: all
 	./$(TARGET)
+
+run_tls: all
+	./scripts/start_tls.sh
 
 # Run parser tests
 test: $(TEST_TARGET)
@@ -163,4 +168,4 @@ test_logger: $(TEST_LOGGER_TARGET)
 # Run ALL tests (basic + extended)
 test_all: test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger
 
-.PHONY: all clean rebuild debug release run test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger test_all
+.PHONY: all clean rebuild debug release run run_plain run_tls test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger test_all

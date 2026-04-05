@@ -669,6 +669,53 @@ void test_tls_registration_transport_is_preserved()
     PASS();
 }
 
+void test_invite_uses_full_aor_key()
+{
+    TEST("INVITE routing uses full user@domain key");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    preRegisterAndLogin(*core, sent, "sip:1001@alpha.example", "<sip:1001@10.0.0.11:5060>",
+                        "10.0.0.11", 5060, "md-reg-a");
+    preRegisterAndLogin(*core, sent, "sip:1001@beta.example", "<sip:1001@10.0.0.12:5060>",
+                        "10.0.0.12", 5060, "md-reg-b");
+
+    sent.clear();
+
+    std::string invRaw = makeInvite("sip:1001@beta.example", "sip:caller@client", "md-call", 1);
+    SipMessage invMsg;
+    assert(parseSipMessage(invRaw, invMsg));
+    UdpPacket invPkt{"10.0.0.20", 5060, invRaw, TransportType::UDP};
+    std::string resp;
+    core->handlePacket(invPkt, invMsg, resp);
+
+    assert(sent.size() >= 2);
+    const SentMsg& forwardedInvite = sent.back();
+    assert(forwardedInvite.ip == "10.0.0.12");
+    assert(forwardedInvite.port == 5060);
+    PASS();
+}
+
+void test_invite_unknown_domain_not_matched_by_user_only()
+{
+    TEST("INVITE unknown domain is not matched by user-only lookup");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    preRegisterAndLogin(*core, sent, "sip:1001@alpha.example", "<sip:1001@10.0.0.11:5060>",
+                        "10.0.0.11", 5060, "md2-reg-a");
+
+    std::string invRaw = makeInvite("sip:1001@gamma.example", "sip:caller@client", "md2-call", 1);
+    SipMessage invMsg;
+    assert(parseSipMessage(invRaw, invMsg));
+    UdpPacket invPkt{"10.0.0.20", 5060, invRaw, TransportType::UDP};
+    std::string resp;
+    core->handlePacket(invPkt, invMsg, resp);
+
+    assert(resp.find("404 Not Found") != std::string::npos);
+    PASS();
+}
+
 // ================================
 // 14) cleanupExpiredRegistrations
 // ================================
@@ -2761,6 +2808,8 @@ int main()
     test_timer_c_invite_timeout();
     test_timer_c_reset_on_provisional();
     test_tls_transport_headers_on_forward();
+    test_invite_uses_full_aor_key();
+    test_invite_unknown_domain_not_matched_by_user_only();
 
     std::cout << "\n[Section 3] BYE\n";
     test_bye_terminates_call();

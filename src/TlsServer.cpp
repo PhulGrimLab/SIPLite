@@ -19,6 +19,7 @@
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <cstdlib>
 
 namespace
 {
@@ -103,6 +104,29 @@ namespace
         ERR_error_string_n(err, buf, sizeof(buf));
         Logger::instance().error(prefix + ": " + std::string(buf));
     }
+
+    bool envEnabled(const char* name, bool defaultValue = false)
+    {
+        const char* raw = std::getenv(name);
+        if (raw == nullptr || *raw == '\0')
+        {
+            return defaultValue;
+        }
+
+        const std::string value = toLower(trim(raw));
+        if (value == "1" || value == "true" || value == "yes" || value == "on")
+        {
+            return true;
+        }
+        if (value == "0" || value == "false" || value == "no" || value == "off")
+        {
+            return false;
+        }
+
+        Logger::instance().error(std::string("[TlsServer] Invalid boolean env ")
+            + name + "=" + raw + ", using default");
+        return defaultValue;
+    }
 }
 
 TlsServer::TlsServer(SipCore& sipCore)
@@ -154,6 +178,13 @@ bool TlsServer::initializeSsl(const std::string& certFile, const std::string& ke
     SSL_load_error_strings();
     OpenSSL_add_ssl_algorithms();
 
+    verifyConfig_.verifyPeer = envEnabled("SIPLITE_TLS_VERIFY_PEER", false);
+    verifyConfig_.requireClientCert = envEnabled("SIPLITE_TLS_REQUIRE_CLIENT_CERT", false);
+    if (const char* caFile = std::getenv("SIPLITE_TLS_CA_FILE"))
+    {
+        verifyConfig_.caFile = trim(caFile);
+    }
+
     serverCtx_ = SSL_CTX_new(TLS_server_method());
     clientCtx_ = SSL_CTX_new(TLS_client_method());
     if (serverCtx_ == nullptr || clientCtx_ == nullptr)
@@ -164,7 +195,6 @@ bool TlsServer::initializeSsl(const std::string& certFile, const std::string& ke
 
     SSL_CTX_set_min_proto_version(serverCtx_, TLS1_2_VERSION);
     SSL_CTX_set_min_proto_version(clientCtx_, TLS1_2_VERSION);
-    SSL_CTX_set_verify(clientCtx_, SSL_VERIFY_NONE, nullptr);
 
     if (SSL_CTX_use_certificate_file(serverCtx_, certFile.c_str(), SSL_FILETYPE_PEM) != 1)
     {
@@ -180,6 +210,73 @@ bool TlsServer::initializeSsl(const std::string& certFile, const std::string& ke
     {
         logSslError("[TlsServer] Certificate/private key mismatch");
         return false;
+    }
+
+    if (!configureVerification())
+    {
+        return false;
+    }
+
+    Logger::instance().info("[TlsServer] Verification policy: verifyPeer="
+        + std::string(verifyConfig_.verifyPeer ? "on" : "off")
+        + ", requireClientCert="
+        + std::string(verifyConfig_.requireClientCert ? "on" : "off")
+        + ", caFile="
+        + (verifyConfig_.caFile.empty() ? "(system default / none)" : verifyConfig_.caFile));
+    if (verifyConfig_.verifyPeer)
+    {
+        Logger::instance().info("[TlsServer] Outbound peer certificate chain verification enabled"
+            " (hostname verification is still not implemented)");
+    }
+
+    return true;
+}
+
+bool TlsServer::configureVerification()
+{
+    auto loadCaStore = [this](SSL_CTX* ctx, const char* roleLabel) -> bool {
+        if (!verifyConfig_.caFile.empty())
+        {
+            if (SSL_CTX_load_verify_locations(ctx, verifyConfig_.caFile.c_str(), nullptr) != 1)
+            {
+                logSslError(std::string("[TlsServer] Failed to load CA file for ") + roleLabel);
+                return false;
+            }
+            return true;
+        }
+
+        if (SSL_CTX_set_default_verify_paths(ctx) != 1)
+        {
+            logSslError(std::string("[TlsServer] Failed to load default CA paths for ") + roleLabel);
+            return false;
+        }
+        return true;
+    };
+
+    if (verifyConfig_.verifyPeer)
+    {
+        if (!loadCaStore(clientCtx_, "outbound TLS"))
+        {
+            return false;
+        }
+        SSL_CTX_set_verify(clientCtx_, SSL_VERIFY_PEER, nullptr);
+    }
+    else
+    {
+        SSL_CTX_set_verify(clientCtx_, SSL_VERIFY_NONE, nullptr);
+    }
+
+    if (verifyConfig_.requireClientCert)
+    {
+        if (!loadCaStore(serverCtx_, "inbound TLS"))
+        {
+            return false;
+        }
+        SSL_CTX_set_verify(serverCtx_, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+    }
+    else
+    {
+        SSL_CTX_set_verify(serverCtx_, SSL_VERIFY_NONE, nullptr);
     }
 
     return true;
@@ -530,6 +627,13 @@ int TlsServer::findOrCreateConnection(const std::string& ip, uint16_t port)
     if (SSL_connect(ssl) != 1)
     {
         logSslError("[TlsServer] SSL_connect failed");
+        SSL_free(ssl);
+        ::close(fd);
+        return -1;
+    }
+    if (verifyConfig_.verifyPeer && SSL_get_verify_result(ssl) != X509_V_OK)
+    {
+        Logger::instance().error("[TlsServer] Peer certificate verification failed after SSL_connect");
         SSL_free(ssl);
         ::close(fd);
         return -1;

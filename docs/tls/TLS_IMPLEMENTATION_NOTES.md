@@ -239,6 +239,56 @@ TLS 서버가 성공적으로 시작되면:
 - 없으면 TCP
 - 없으면 UDP
 
+### 3. 인증서 검증 정책
+
+초기 구현은 `SSL_VERIFY_NONE` 기반이라 테스트에는 편했지만 운영 정책이 없었다.
+
+현재는 아래 환경변수를 통해 검증 정책을 선택할 수 있다.
+
+- `SIPLITE_TLS_VERIFY_PEER=0|1`
+  - `1`이면 outbound `SSL_connect()` 경로에서 peer certificate chain 검증 수행
+- `SIPLITE_TLS_CA_FILE=/path/to/ca.pem`
+  - 지정 시 해당 CA 파일 사용
+  - 미지정 시 시스템 기본 CA store 사용 시도
+- `SIPLITE_TLS_REQUIRE_CLIENT_CERT=0|1`
+  - `1`이면 inbound `SSL_accept()` 경로에서 client certificate 필수
+
+주의:
+
+- 현재 단계의 `verify peer`는 certificate chain 검증 중심이다.
+- hostname verification은 아직 구현하지 않았다.
+- 따라서 운영 환경에서는 CA와 인증서 이름 정책을 별도로 정리해야 한다.
+
+## 11. TLS 실행 진입점 정리
+
+이제 `build -> run` 흐름에서 TLS가 바로 뜨도록 실행 경로를 정리했다.
+
+- `make run`
+  - 내부적으로 `run_tls`를 호출
+  - `scripts/start_tls.sh`를 통해 TLS 모드로 서버 시작
+- `make run_plain`
+  - TLS 없이 기존 평문 모드로 실행
+
+또한 `scripts/start_tls.sh`는 인증서가 없으면 더 이상 바로 실패하지 않는다.
+
+- `scripts/ensure_tls_certs.sh`를 호출해서
+  - `certs/server.crt`
+  - `certs/server.key`
+  를 자동 생성한다.
+- 기본 self-signed 인증서는 아래 값으로 만들어진다.
+  - `CN=127.0.0.1`
+  - `SAN IP=127.0.0.1`
+  - `SAN DNS=localhost`
+
+필요하면 아래 환경변수로 즉시 바꿔서 실행할 수 있다.
+
+- `SIPLITE_TLS_CERT_CN`
+- `SIPLITE_TLS_CERT_SAN_IP`
+- `SIPLITE_TLS_CERT_SAN_DNS`
+- `SIPLITE_TLS_CERT_DAYS`
+
+즉 기본 개발 환경에서는 별도 인증서 준비 없이 `make run`만으로 TLS 리스너가 올라온다.
+
 순서다.
 
 이 정책이 모든 dialog에서 올바른지 Linphone 실제 상호운용 테스트가 더 필요하다.

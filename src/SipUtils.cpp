@@ -185,6 +185,73 @@ std::string extractUserFromUri(const std::string& uri)
     return trim(u.substr(start, atPos - start));
 }
 
+std::string extractAorKeyFromUri(const std::string& uri)
+{
+    std::string u = trim(uri);
+    if (u.empty())
+    {
+        return {};
+    }
+
+    const std::string lower = toLower(u);
+    std::size_t start = 0;
+    if (lower.rfind("sip:", 0) == 0)
+    {
+        start = 4;
+    }
+    else if (lower.rfind("sips:", 0) == 0)
+    {
+        start = 5;
+    }
+
+    std::size_t hostStart = start;
+    std::string user;
+    const std::size_t atPos = u.find('@', start);
+    if (atPos != std::string::npos)
+    {
+        user = toLower(trim(u.substr(start, atPos - start)));
+        hostStart = atPos + 1;
+    }
+
+    std::size_t hostEnd = u.find_first_of(";?>", hostStart);
+    if (hostEnd == std::string::npos)
+    {
+        hostEnd = u.size();
+    }
+
+    const std::size_t colonPos = u.find(':', hostStart);
+    if (colonPos != std::string::npos && colonPos < hostEnd)
+    {
+        const std::string afterColon = u.substr(colonPos + 1, hostEnd - (colonPos + 1));
+        bool portOnly = !afterColon.empty();
+        for (char c : afterColon)
+        {
+            if (!std::isdigit(static_cast<unsigned char>(c)))
+            {
+                portOnly = false;
+                break;
+            }
+        }
+        if (portOnly)
+        {
+            hostEnd = colonPos;
+        }
+    }
+
+    const std::string host = toLower(trim(u.substr(hostStart, hostEnd - hostStart)));
+    if (host.empty())
+    {
+        return {};
+    }
+
+    if (user.empty())
+    {
+        return host;
+    }
+
+    return user + "@" + host;
+}
+
 // SIP 메서드 유효성 검사
 // SIP 메서드는 RFC3261에서 정의된 메서드 집합에 속해야 합니다.
 // 예: "INVITE" -> valid, "FOO" -> invalid, "BYE" -> valid

@@ -16,6 +16,7 @@ std::vector<std::string> getAllHeaders(const struct SipMessage& msg, const std::
 std::string sanitizeHeaderValue(const std::string& value);
 std::string extractUriFromHeader(const std::string& headerValue);
 std::string extractUserFromUri(const std::string& uri);
+std::string extractAorKeyFromUri(const std::string& uri);
 
 // Validation helpers
 bool isValidSipMethod(const std::string& method);
