@@ -755,6 +755,41 @@ void test_cleanupStaleTransactions()
     PASS();
 }
 
+void test_cleanupExpiredSubscriptions_preserves_transport()
+{
+    TEST("cleanupExpiredSubscriptions sends terminated NOTIFY with subscriber transport");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    std::string subRaw =
+        "SUBSCRIBE sip:1001@server SIP/2.0\r\n"
+        "Via: SIP/2.0/TLS subscriber:5061\r\n"
+        "From: <sip:1002@client>;tag=subexp\r\n"
+        "To: <sip:1001@server>\r\n"
+        "Call-ID: sub-expire\r\n"
+        "CSeq: 1 SUBSCRIBE\r\n"
+        "Event: presence\r\n"
+        "Contact: <sips:1002@10.0.0.2:5061>\r\n"
+        "Expires: 1\r\n"
+        "Content-Length: 0\r\n\r\n";
+
+    SipMessage msg;
+    assert(parseSipMessage(subRaw, msg));
+    UdpPacket pkt{"10.0.0.2", 5061, subRaw, TransportType::TLS};
+    std::string resp;
+    core->handlePacket(pkt, msg, resp);
+    assert(resp.find("200 OK") != std::string::npos);
+
+    sent.clear();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::size_t removed = core->cleanupExpiredSubscriptions();
+    assert(removed == 1);
+    assert(sent.size() == 1);
+    assert(sent[0].transport == TransportType::TLS);
+    assert(sent[0].data.find("Subscription-State: terminated;reason=timeout") != std::string::npos);
+    PASS();
+}
+
 // ================================
 // 17) Response 처리 — Response 타입은 handlePacket에서 거부
 // ================================
@@ -2760,6 +2795,7 @@ int main()
     test_cleanupExpiredRegistrations();
     test_cleanupStaleCalls();
     test_cleanupStaleTransactions();
+    test_cleanupExpiredSubscriptions_preserves_transport();
 
     std::cout << "\n[Section 9] Additional flows\n";
     test_unsupported_method();

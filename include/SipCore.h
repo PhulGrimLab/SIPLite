@@ -1057,7 +1057,8 @@ private:
                                     const std::string& reason,
                                     const std::string& toTag,
                                     const std::string& sdpBody,
-                                    const std::string& contentType = "application/sdp");
+                                    const std::string& contentType = "application/sdp",
+                                    TransportType transport = TransportType::UDP);
 
     struct PendingInvite; // forward declaration
 
@@ -1073,6 +1074,7 @@ private:
     std::string buildRegisterAuthChallenge(const SipMessage& req,
                                            const std::string& nonce,
                                            bool stale);
+    std::string buildLocalContactHeader(TransportType transport) const;
     enum class DialogPeerSide { Unknown, Caller, Callee };
     DialogPeerSide classifyDialogPeerSide(const ActiveCall& call,
                                           const SipMessage& msg,

@@ -36,6 +36,19 @@ TLS가 "코드가 존재하는 수준"인지, 아니면 실제 SIP 라우팅에 
 4. 메인 sender가 `preferred transport`를 우선 사용하도록 변경
 5. TLS 등록 후 INVITE/MESSAGE/NOTIFY/CANCEL/ACK/BYE 라우팅이 transport-aware 하게 유지되도록 보완
 
+## 2026-04-05 추가 진행 사항
+
+- 위 transport-aware 라우팅 모델 구현 완료
+- TLS 등록 후 전달 INVITE가 TLS 선호 transport로 송신되는 테스트 추가
+- 메인 루프에 `cleanupExpiredSubscriptions()` 연결
+- 구독 만료 시 `terminated` NOTIFY도 subscriber transport를 유지하도록 검증 추가
+- `buildInviteResponse()`의 고정 `Contact: <sip:server@0.0.0.0:5060>` 제거
+- 로컬 transport에 맞춰
+  - UDP: `sip:server@IP:PORT`
+  - TCP: `sip:server@IP:PORT;transport=tcp`
+  - TLS: `sips:server@IP:PORT`
+  형식으로 Contact를 생성하도록 보완
+
 ## 별도 확인 필요 항목
 
 - `buildInviteResponse()`의 `Contact`는 아직 `sip:server@0.0.0.0:5060` 고정 값이므로 추후 transport-aware 보완 필요

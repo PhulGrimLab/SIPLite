@@ -236,8 +236,9 @@ int main(int argc, char* argv[])
         {
             // RFC 3261 §16.7 Timer C: INVITE 타임아웃 확인 (180초)
             udpServer.sipCore().cleanupTimerC();
-            // 만료된 등록 및 stale 통화/트랜잭션 정리
+            // 만료된 등록/구독 및 stale 통화/트랜잭션 정리
             udpServer.sipCore().cleanupExpiredRegistrations();
+            udpServer.sipCore().cleanupExpiredSubscriptions();
             udpServer.sipCore().cleanupStaleCalls();
             udpServer.sipCore().cleanupStaleTransactions();
             lastCleanup = now;

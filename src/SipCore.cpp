@@ -2403,7 +2403,8 @@ std::string SipCore::buildInviteResponse(const SipMessage& req,
                                          const std::string& reason,
                                          const std::string& toTag,
                                          const std::string& sdpBody,
-                                         const std::string& contentType)
+                                         const std::string& contentType,
+                                         TransportType transport)
 {
     std::ostringstream oss;
     oss << "SIP/2.0 " << code << " " << reason << "\r\n";
@@ -2439,7 +2440,7 @@ std::string SipCore::buildInviteResponse(const SipMessage& req,
 
     if (code >= 200 && code < 300)
     {
-        oss << "Contact: <sip:server@0.0.0.0:5060>\r\n";
+        oss << buildLocalContactHeader(transport);
     }
 
     oss << "Server: SIPLite/0.1\r\n";
@@ -2647,6 +2648,32 @@ std::string SipCore::buildRegisterOk(const SipMessage& req)
     oss << "Content-Length: 0\r\n";
     oss << "\r\n";
     return oss.str();
+}
+
+std::string SipCore::buildLocalContactHeader(TransportType transport) const
+{
+    const TransportLocalAddress* local = &udpLocal_;
+    if (transport == TransportType::TCP)
+    {
+        local = &tcpLocal_;
+    }
+    else if (transport == TransportType::TLS)
+    {
+        local = &tlsLocal_;
+    }
+
+    const std::string addr = local->ip.empty() ? "127.0.0.1" : local->ip;
+    const uint16_t port = local->port ? local->port : (transport == TransportType::TLS ? 5061 : 5060);
+
+    if (transport == TransportType::TLS)
+    {
+        return "Contact: <sips:server@" + addr + ":" + std::to_string(port) + ">\r\n";
+    }
+    if (transport == TransportType::TCP)
+    {
+        return "Contact: <sip:server@" + addr + ":" + std::to_string(port) + ";transport=tcp>\r\n";
+    }
+    return "Contact: <sip:server@" + addr + ":" + std::to_string(port) + ">\r\n";
 }
 
 std::string SipCore::buildRegisterAuthChallenge(const SipMessage& req,
