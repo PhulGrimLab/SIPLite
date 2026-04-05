@@ -716,13 +716,13 @@ void TcpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
         return;
     }
 
-    // 수신 로그
+    if (isVerboseSipLoggingEnabled())
     {
         std::lock_guard<std::mutex> lock(g_tcpLogMutex);
         std::cout << "------------------------------------------\n";
         std::cout << "[TCP Worker " << workerId << "] from "
                 << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-        std::cout << sanitizeForDisplay(pkt.data, MAX_LOG_DATA_LENGTH) << "\n";
+        std::cout << sanitizeSipForLog(pkt.data, MAX_LOG_DATA_LENGTH) << "\n";
     }
 
     // SIP 메시지 파싱
@@ -745,10 +745,13 @@ void TcpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
             {
                 if (sendTo(pkt.remoteIp, pkt.remotePort, response))
                 {
-                    std::lock_guard<std::mutex> lock(g_tcpLogMutex);
-                    std::cout << "[TCP Worker " << workerId << "] SIP response sent to "
-                              << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-                    std::cout << sanitizeForDisplay(response, MAX_LOG_DATA_LENGTH) << "\n";
+                    if (isVerboseSipLoggingEnabled())
+                    {
+                        std::lock_guard<std::mutex> lock(g_tcpLogMutex);
+                        std::cout << "[TCP Worker " << workerId << "] SIP response sent to "
+                                  << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+                        std::cout << sanitizeSipForLog(response, MAX_LOG_DATA_LENGTH) << "\n";
+                    }
                 }
                 else
                 {
@@ -791,27 +794,48 @@ bool TcpServer::sendTo(const std::string& ip, uint16_t port, const std::string& 
         return false;
     }
 
+    std::shared_ptr<std::mutex> ioMutex;
+    {
+        std::lock_guard<std::mutex> lock(connMutex_);
+        auto it = connections_.find(fd);
+        if (it == connections_.end() || !it->second.ioMutex)
+        {
+            return false;
+        }
+        ioMutex = it->second.ioMutex;
+    }
+
     // TCP는 스트림이므로 전체 데이터를 보낼 때까지 반복
     const char* ptr = data.c_str();
     std::size_t remaining = data.size();
+    bool sendFailed = false;
 
-    while (remaining > 0)
     {
-        ssize_t sent = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
-        if (sent < 0)
+        std::lock_guard<std::mutex> ioLock(*ioMutex);
+        while (remaining > 0)
         {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            ssize_t sent = ::send(fd, ptr, remaining, MSG_NOSIGNAL);
+            if (sent < 0)
             {
-                // 잠시 대기 후 재시도
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    // 잠시 대기 후 재시도
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+                logError("send(TCP)");
+                sendFailed = true;
+                break;
             }
-            logError("send(TCP)");
-            removeConnection(fd);
-            return false;
+            ptr += sent;
+            remaining -= static_cast<std::size_t>(sent);
         }
-        ptr += sent;
-        remaining -= static_cast<std::size_t>(sent);
+    }
+
+    if (sendFailed)
+    {
+        removeConnection(fd);
+        return false;
     }
 
     return true;

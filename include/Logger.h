@@ -4,6 +4,7 @@
 #include <fstream>
 #include <mutex>
 #include <atomic>
+#include <cstddef>
 
 class Logger
 {
@@ -28,6 +29,7 @@ private:
 
     void rotateIfNeeded();
     void purgeOldLogs();
+    void loadFlushPolicy();
 
     // Ensure logger is initialized exactly once using std::call_once
     void ensureInitialized();
@@ -38,6 +40,8 @@ private:
     std::ofstream ofs_;
     std::mutex mutex_;
     int retentionDays_ = 7; // 보존기간(일)
+    std::size_t flushEvery_ = 16;
+    std::size_t pendingFlushCount_ = 0;
     std::once_flag initFlag_;
     std::atomic<bool> purgedOnce_{false}; // ensure purge runs at most once per process, unless forced
 };

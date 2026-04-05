@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <mutex>
+#include <cstdlib>
 
 Logger& Logger::instance()
 {
@@ -17,6 +18,7 @@ Logger& Logger::instance()
 Logger::Logger()
     : retentionDays_(7)
 {
+    loadFlushPolicy();
 }
 
 Logger::~Logger()
@@ -103,6 +105,8 @@ void Logger::init(const std::string& dir, int retentionDays)
         std::lock_guard<std::mutex> lock(mutex_);
         dir_ = dir;
         retentionDays_ = (retentionDays < 0) ? 0 : retentionDays;
+        loadFlushPolicy();
+        pendingFlushCount_ = 0;
 
         // Apply configuration immediately: ensure log file exists and purge old logs
         try { rotateIfNeeded(); } catch (...) { /* 무시 */ }
@@ -114,6 +118,41 @@ void Logger::init(const std::string& dir, int retentionDays)
         std::call_once(initFlag_, []() { /* no-op; mark as initialized */ });
     }
     catch (...) { /* 무시: call_once shouldn't throw here */ }
+}
+
+void Logger::loadFlushPolicy()
+{
+    constexpr std::size_t DEFAULT_FLUSH_EVERY = 16;
+    constexpr std::size_t MAX_FLUSH_EVERY = 1024;
+
+    flushEvery_ = DEFAULT_FLUSH_EVERY;
+
+    const char* env = std::getenv("SIPLITE_LOG_FLUSH_EVERY");
+    if (env == nullptr || *env == '\0')
+    {
+        return;
+    }
+
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(env, &end, 10);
+    if (end == env || (end != nullptr && *end != '\0'))
+    {
+        return;
+    }
+
+    if (parsed == 0)
+    {
+        flushEvery_ = 1;
+        return;
+    }
+
+    if (parsed > MAX_FLUSH_EVERY)
+    {
+        flushEvery_ = MAX_FLUSH_EVERY;
+        return;
+    }
+
+    flushEvery_ = static_cast<std::size_t>(parsed);
 }
 
 void Logger::setRetentionDays(int days)
@@ -204,10 +243,12 @@ void Logger::shutdown()
     std::lock_guard<std::mutex> lock(mutex_);
     if (ofs_.is_open())
     { 
+        try { ofs_.flush(); } catch (...) { /* 무시 */ }
         ofs_.close();
     }
 
     currentHour_.clear();
+    pendingFlushCount_ = 0;
 }
 
 void Logger::info(const std::string& msg)
@@ -251,6 +292,24 @@ void Logger::logInternal(const std::string& line, bool isError)
     // File output when available
     if (ofs_.is_open())
     {
-        try { ofs_ << line; ofs_.flush(); } catch (...) { /* 무시 */ }
+        try
+        {
+            ofs_ << line;
+            if (isError)
+            {
+                ofs_.flush();
+                pendingFlushCount_ = 0;
+            }
+            else
+            {
+                ++pendingFlushCount_;
+                if (pendingFlushCount_ >= flushEvery_)
+                {
+                    ofs_.flush();
+                    pendingFlushCount_ = 0;
+                }
+            }
+        }
+        catch (...) { /* 무시 */ }
     }
 }

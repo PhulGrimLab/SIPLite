@@ -4,6 +4,7 @@
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -623,6 +624,18 @@ int TlsServer::findOrCreateConnection(const std::string& ip, uint16_t port)
         return -1;
     }
 
+    if (verifyConfig_.verifyPeer)
+    {
+        X509_VERIFY_PARAM* verifyParams = SSL_get0_param(ssl);
+        if (verifyParams == nullptr || X509_VERIFY_PARAM_set1_ip_asc(verifyParams, ip.c_str()) != 1)
+        {
+            Logger::instance().error("[TlsServer] Failed to configure peer IP verification for " + key);
+            SSL_free(ssl);
+            ::close(fd);
+            return -1;
+        }
+    }
+
     SSL_set_fd(ssl, fd);
     if (SSL_connect(ssl) != 1)
     {
@@ -980,12 +993,13 @@ void TlsServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
         return;
     }
 
+    if (isVerboseSipLoggingEnabled())
     {
         std::lock_guard<std::mutex> lock(g_tlsLogMutex);
         std::cout << "------------------------------------------\n";
         std::cout << "[TLS Worker " << workerId << "] from "
                   << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-        std::cout << sanitizeForDisplay(pkt.data, MAX_LOG_DATA_LENGTH) << "\n";
+        std::cout << sanitizeSipForLog(pkt.data, MAX_LOG_DATA_LENGTH) << "\n";
     }
 
     SipMessage msg;
@@ -1039,26 +1053,35 @@ bool TlsServer::sendTo(const std::string& ip, uint16_t port, const std::string& 
         conn = it->second;
     }
 
-    std::lock_guard<std::mutex> ioLock(conn->ioMutex);
     const char* ptr = data.c_str();
     std::size_t remaining = data.size();
-    while (remaining > 0)
+    bool sendFailed = false;
     {
-        int sent = SSL_write(conn->ssl, ptr, static_cast<int>(remaining));
-        if (sent <= 0)
+        std::lock_guard<std::mutex> ioLock(conn->ioMutex);
+        while (remaining > 0)
         {
-            int sslErr = SSL_get_error(conn->ssl, sent);
-            if (sslErr == SSL_ERROR_WANT_READ || sslErr == SSL_ERROR_WANT_WRITE)
+            int sent = SSL_write(conn->ssl, ptr, static_cast<int>(remaining));
+            if (sent <= 0)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
+                int sslErr = SSL_get_error(conn->ssl, sent);
+                if (sslErr == SSL_ERROR_WANT_READ || sslErr == SSL_ERROR_WANT_WRITE)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+                logSslError("[TlsServer] SSL_write failed");
+                sendFailed = true;
+                break;
             }
-            logSslError("[TlsServer] SSL_write failed");
-            removeConnection(fd);
-            return false;
+            ptr += sent;
+            remaining -= static_cast<std::size_t>(sent);
         }
-        ptr += sent;
-        remaining -= static_cast<std::size_t>(sent);
+    }
+
+    if (sendFailed)
+    {
+        removeConnection(fd);
+        return false;
     }
     return true;
 }

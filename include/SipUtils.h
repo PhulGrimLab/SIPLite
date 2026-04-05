@@ -35,6 +35,8 @@ std::string sanitizeForDisplay(const std::string& input,
                                 std::size_t maxLen = 512,
                                 char replacement = '.',
                                 bool allowCrLfTab = true);
+std::string sanitizeSipForLog(const std::string& input, std::size_t maxLen = 512);
+bool isVerboseSipLoggingEnabled();
 
 // Helper to ensure To header has tag
 std::string ensureToTag(const std::string& to);

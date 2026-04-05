@@ -4,6 +4,12 @@ OPENSSL_CFLAGS := $(shell pkg-config --cflags openssl 2>/dev/null)
 OPENSSL_LIBS := $(shell pkg-config --libs openssl 2>/dev/null)
 CXXFLAGS = -Wall -Wextra -std=c++17 -g -I./include -pthread $(OPENSSL_CFLAGS)
 LDFLAGS = -pthread $(OPENSSL_LIBS)
+SANITIZER_COMMON_FLAGS = -O1 -fno-omit-frame-pointer
+ASAN_UBSAN_FLAGS = $(SANITIZER_COMMON_FLAGS) -fsanitize=address,undefined
+TSAN_FLAGS = $(SANITIZER_COMMON_FLAGS) -fsanitize=thread
+ASAN_ENV = ASAN_OPTIONS=detect_leaks=0:check_initialization_order=1:strict_string_checks=1
+UBSAN_ENV = UBSAN_OPTIONS=print_stacktrace=1
+TSAN_ENV = TSAN_OPTIONS=halt_on_error=1:history_size=7
 
 ifeq ($(wildcard /usr/include/openssl/err.h),)
 $(error OpenSSL development headers not found. Install libssl-dev, then rebuild)
@@ -13,6 +19,8 @@ endif
 SRC_DIR = src
 BUILD_DIR = build
 TARGET = $(BUILD_DIR)/my_siplite
+ASAN_BUILD_DIR = build-asan
+TSAN_BUILD_DIR = build-tsan
 
 # 소스 파일 찾기
 SRCS = $(wildcard $(SRC_DIR)/*.cpp)
@@ -168,4 +176,21 @@ test_logger: $(TEST_LOGGER_TARGET)
 # Run ALL tests (basic + extended)
 test_all: test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger
 
-.PHONY: all clean rebuild debug release run run_plain run_tls test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger test_all
+asan_test_all:
+	$(MAKE) clean $(ASAN_BUILD_DIR)/test_parser $(ASAN_BUILD_DIR)/test_utils $(ASAN_BUILD_DIR)/test_sipcore $(ASAN_BUILD_DIR)/test_parser_extended $(ASAN_BUILD_DIR)/test_utils_extended $(ASAN_BUILD_DIR)/test_sipcore_extended $(ASAN_BUILD_DIR)/test_transaction $(ASAN_BUILD_DIR)/test_xmlconfig $(ASAN_BUILD_DIR)/test_concurrent_queue $(ASAN_BUILD_DIR)/test_logger BUILD_DIR=$(ASAN_BUILD_DIR) CXXFLAGS="$(CXXFLAGS) $(ASAN_UBSAN_FLAGS)" LDFLAGS="$(LDFLAGS) -fsanitize=address,undefined"
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_parser
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_utils
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_sipcore
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_parser_extended
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_utils_extended
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_sipcore_extended
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_transaction
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_xmlconfig
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_concurrent_queue
+	$(ASAN_ENV) $(UBSAN_ENV) ./$(ASAN_BUILD_DIR)/test_logger
+
+tsan_test_sipcore_ext:
+	$(MAKE) clean $(TSAN_BUILD_DIR)/test_sipcore_extended BUILD_DIR=$(TSAN_BUILD_DIR) CXXFLAGS="$(CXXFLAGS) $(TSAN_FLAGS)" LDFLAGS="$(LDFLAGS) -fsanitize=thread"
+	$(TSAN_ENV) ./$(TSAN_BUILD_DIR)/test_sipcore_extended
+
+.PHONY: all clean rebuild debug release run run_plain run_tls test test_utils test_sipcore test_parser_ext test_utils_ext test_sipcore_ext test_transaction test_xmlconfig test_concurrent_queue test_logger test_all asan_test_all tsan_test_sipcore_ext

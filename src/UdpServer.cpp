@@ -427,13 +427,13 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
         return;
     }
 
-    // 수신 로그 (정화된 데이터)
+    if (isVerboseSipLoggingEnabled())
     {
         std::lock_guard<std::mutex> lock(g_logMutex);
         std::cout << "------------------------------------------\n";
         std::cout << "[Worker " << workerId << "] from "
                 << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-        std::cout << sanitizeForDisplay(pkt.data, MAX_LOG_DATA_LENGTH) << "\n";
+        std::cout << sanitizeSipForLog(pkt.data, MAX_LOG_DATA_LENGTH) << "\n";
     }
 
     // SIP 메시지 파싱
@@ -458,10 +458,13 @@ void UdpServer::handlePacket(std::size_t workerId, const UdpPacket& pkt)
                 // 응답 전송
                 if (sendTo(pkt.remoteIp, pkt.remotePort, response))
                 {
-                    std::lock_guard<std::mutex> lock(g_logMutex);
-                    std::cout << "[Worker " << workerId << "] SIP response sent to "
-                              << pkt.remoteIp << ":" << pkt.remotePort << "\n";
-                    std::cout << sanitizeForDisplay(response, MAX_LOG_DATA_LENGTH) << "\n";
+                    if (isVerboseSipLoggingEnabled())
+                    {
+                        std::lock_guard<std::mutex> lock(g_logMutex);
+                        std::cout << "[Worker " << workerId << "] SIP response sent to "
+                                  << pkt.remoteIp << ":" << pkt.remotePort << "\n";
+                        std::cout << sanitizeSipForLog(response, MAX_LOG_DATA_LENGTH) << "\n";
+                    }
                 }
                 else
                 {

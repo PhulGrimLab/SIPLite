@@ -600,6 +600,21 @@ void test_extractUri_with_params()
     PASS();
 }
 
+void test_sanitizeSipForLog_redacts_authorization()
+{
+    TEST("sanitizeSipForLog redacts auth headers");
+    std::string sip =
+        "REGISTER sip:server SIP/2.0\r\n"
+        "Authorization: Digest username=\"1001\", response=\"abcd\"\r\n"
+        "Proxy-Authorization: Digest username=\"1002\", response=\"efgh\"\r\n"
+        "\r\n";
+    std::string out = sanitizeSipForLog(sip, 512);
+    assert(out.find("Authorization: [redacted]") != std::string::npos);
+    assert(out.find("Proxy-Authorization: [redacted]") != std::string::npos);
+    assert(out.find("response=\"abcd\"") == std::string::npos);
+    PASS();
+}
+
 // ================================
 // main
 // ================================
@@ -695,6 +710,7 @@ int main()
     test_parseCSeqMethod_trailing_whitespace_kept();
     test_extractUri_nested_brackets();
     test_extractUri_with_params();
+    test_sanitizeSipForLog_redacts_authorization();
 
     std::cout << "\n=================================\n";
     std::cout << "Results: " << testsPassed << " passed, " << testsFailed << " failed\n";

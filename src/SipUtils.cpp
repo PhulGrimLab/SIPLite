@@ -7,12 +7,51 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 
 namespace
 {
     inline std::uint32_t leftRotate(std::uint32_t value, std::uint32_t shift)
     {
         return (value << shift) | (value >> (32U - shift));
+    }
+
+    bool startsWithHeaderName(const std::string& line, const char* headerName)
+    {
+        const std::size_t headerLen = std::strlen(headerName);
+        if (line.size() < headerLen + 1)
+        {
+            return false;
+        }
+        for (std::size_t i = 0; i < headerLen; ++i)
+        {
+            if (std::tolower(static_cast<unsigned char>(line[i])) !=
+                std::tolower(static_cast<unsigned char>(headerName[i])))
+            {
+                return false;
+            }
+        }
+        return line[headerLen] == ':';
+    }
+
+    bool shouldRedactSipHeader(const std::string& line)
+    {
+        static const char* sensitiveHeaders[] = {
+            "authorization",
+            "proxy-authorization",
+            "www-authenticate",
+            "proxy-authenticate",
+            nullptr
+        };
+
+        for (const char** header = sensitiveHeaders; *header != nullptr; ++header)
+        {
+            if (startsWithHeaderName(line, *header))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 }
 
@@ -404,6 +443,67 @@ std::string sanitizeForDisplay(const std::string& input,
     }
 
     return result;
+}
+
+std::string sanitizeSipForLog(const std::string& input, std::size_t maxLen)
+{
+    std::string sanitized;
+    sanitized.reserve(std::min(input.size(), maxLen));
+
+    std::size_t pos = 0;
+    bool inHeaders = true;
+    while (pos < input.size() && sanitized.size() < maxLen)
+    {
+        std::size_t lineEnd = input.find("\r\n", pos);
+        const bool hasCrLf = (lineEnd != std::string::npos);
+        if (!hasCrLf)
+        {
+            lineEnd = input.size();
+        }
+
+        std::string line = input.substr(pos, lineEnd - pos);
+        if (inHeaders && line.empty())
+        {
+            inHeaders = false;
+        }
+
+        if (inHeaders && shouldRedactSipHeader(line))
+        {
+            const std::size_t colon = line.find(':');
+            line = line.substr(0, colon + 1) + " [redacted]";
+        }
+
+        sanitized += sanitizeForDisplay(line, maxLen, '.', false);
+        if (hasCrLf)
+        {
+            sanitized += "\r\n";
+            pos = lineEnd + 2;
+        }
+        else
+        {
+            pos = lineEnd;
+        }
+    }
+
+    if (sanitized.size() > maxLen)
+    {
+        sanitized = sanitizeForDisplay(sanitized, maxLen);
+    }
+    return sanitized;
+}
+
+bool isVerboseSipLoggingEnabled()
+{
+    static const bool enabled = []() {
+        const char* env = std::getenv("SIPLITE_VERBOSE_SIP_LOG");
+        if (env == nullptr)
+        {
+            return false;
+        }
+        const std::string value = toLower(trim(env));
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }();
+    return enabled;
 }
 
 // To 헤더에 tag 없으면 tag=server 추가

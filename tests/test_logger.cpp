@@ -7,6 +7,7 @@
 #include <thread>
 #include <chrono>
 #include <vector>
+#include <cstdlib>
 
 // 테스트 카운터
 static int testsPassed = 0;
@@ -129,14 +130,13 @@ void test_info_creates_log_file()
     Logger::instance().init(TEST_LOG_DIR, 7);
 
     Logger::instance().info("Hello from test_info");
+    Logger::instance().shutdown();
 
     // 로그 파일 확인
     assert(countLogFiles() >= 1);
     std::string content = readFirstLogFile();
     assert(content.find("[INFO]") != std::string::npos);
     assert(content.find("Hello from test_info") != std::string::npos);
-
-    Logger::instance().shutdown();
     PASS();
 }
 
@@ -147,12 +147,11 @@ void test_error_creates_log_with_error_tag()
     Logger::instance().init(TEST_LOG_DIR, 7);
 
     Logger::instance().error("Something went wrong");
+    Logger::instance().shutdown();
 
     std::string content = readFirstLogFile();
     assert(content.find("[ERROR]") != std::string::npos);
     assert(content.find("Something went wrong") != std::string::npos);
-
-    Logger::instance().shutdown();
     PASS();
 }
 
@@ -166,14 +165,13 @@ void test_multiple_log_entries()
     Logger::instance().info("line2");
     Logger::instance().error("err1");
     Logger::instance().info("line3");
+    Logger::instance().shutdown();
 
     std::string content = readFirstLogFile();
     assert(content.find("line1") != std::string::npos);
     assert(content.find("line2") != std::string::npos);
     assert(content.find("err1") != std::string::npos);
     assert(content.find("line3") != std::string::npos);
-
-    Logger::instance().shutdown();
     PASS();
 }
 
@@ -214,11 +212,10 @@ void test_log_after_shutdown_reinitializes()
     // shutdown 후 다시 init + 로깅
     Logger::instance().init(TEST_LOG_DIR, 7);
     Logger::instance().info("after reinit");
+    Logger::instance().shutdown();
 
     std::string content = readFirstLogFile();
     assert(content.find("after reinit") != std::string::npos);
-
-    Logger::instance().shutdown();
     PASS();
 }
 
@@ -258,6 +255,7 @@ void test_log_filename_pattern()
     cleanTestDir();
     Logger::instance().init(TEST_LOG_DIR, 7);
     Logger::instance().info("check filename");
+    Logger::instance().shutdown();
 
     bool foundPattern = false;
     for (const auto& entry : fs::directory_iterator(TEST_LOG_DIR)) {
@@ -269,8 +267,6 @@ void test_log_filename_pattern()
         }
     }
     assert(foundPattern);
-
-    Logger::instance().shutdown();
     PASS();
 }
 
@@ -301,6 +297,7 @@ void test_concurrent_logging()
     }
 
     for (auto& t : threads) t.join();
+    Logger::instance().shutdown();
 
     std::string content = readFirstLogFile();
     // 모든 스레드의 로그가 파일에 있어야 함
@@ -316,8 +313,22 @@ void test_concurrent_logging()
         ++pos;
     }
     assert(infoCount + errorCount == THREADS * LINES_PER_THREAD);
+    PASS();
+}
 
+void test_flush_policy_env_support()
+{
+    TEST("Flush policy honors SIPLITE_LOG_FLUSH_EVERY");
+    cleanTestDir();
+    setenv("SIPLITE_LOG_FLUSH_EVERY", "1", 1);
+
+    Logger::instance().init(TEST_LOG_DIR, 7);
+    Logger::instance().info("flush-now");
+    std::string content = readFirstLogFile();
+    assert(content.find("flush-now") != std::string::npos);
     Logger::instance().shutdown();
+
+    unsetenv("SIPLITE_LOG_FLUSH_EVERY");
     PASS();
 }
 
@@ -374,6 +385,7 @@ int main()
 
     std::cout << "\n[Section 7] 멀티스레드 로깅\n";
     test_concurrent_logging();
+    test_flush_policy_env_support();
 
     std::cout << "\n[Section 8] ensureInitialized\n";
     test_logging_without_init();

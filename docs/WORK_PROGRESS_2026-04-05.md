@@ -107,7 +107,42 @@ TLS가 "코드가 존재하는 수준"인지, 아니면 실제 SIP 라우팅에 
   - 잘못된 transport 값 거부
   - `registerTerminals()` 이후 `Registration.transport` 반영 확인
 
+## 2026-04-05 안정성/보안 보완
+
+- `TlsServer::sendTo()`에서 `SSL_write()` 실패 시 연결 제거를 같은 `ioMutex` 잠금 구간 안에서 호출하던 self-deadlock 가능성 제거
+- `TcpServer` 연결별 송신 경로에 `ioMutex`를 추가해 같은 소켓으로 동시 송신 시 SIP 메시지 바이트가 섞일 수 있던 문제 방지
+- outbound TLS peer 검증 활성화 시 certificate chain 검증뿐 아니라 접속 대상 IP에 대한 certificate name 검증도 함께 수행하도록 보완
+
+## 2026-04-05 sanitizer 검증 경로 추가
+
+- `Makefile`에 sanitizer 전용 타깃 추가
+  - `make asan_test_all`
+  - `make tsan_test_sipcore_ext`
+- `asan_test_all`은 `ASan + UBSan`으로 전체 테스트 바이너리를 다시 빌드하고 leak/UB 검사를 켠 상태로 모두 실행
+- `tsan_test_sipcore_ext`는 스레드 경합 확인용으로 `test_sipcore_extended`를 `TSan`으로 빌드/실행
+- 기본 개발 흐름과 분리해서 필요 시만 무거운 검증을 수행할 수 있도록 구성
+- 현재 Codex 실행 환경에서는 LeakSanitizer가 `ptrace` 제약으로 실패하므로 `asan_test_all` 기본값은 `detect_leaks=0`
+- 현재 Codex 실행 환경에서는 `tsan_test_sipcore_ext` 실행 시 `FATAL: ThreadSanitizer: unexpected memory mapping ...` 으로 중단되어 런타임 TSan 결과는 해석 불가
+
+## 2026-04-05 로그 보안/성능 보완
+
+- SIP 패킷 전문 로그는 기본 비활성화하고 `SIPLITE_VERBOSE_SIP_LOG=1`일 때만 출력되도록 변경
+- 패킷 전문을 출력할 때도 `Authorization`, `Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate` 헤더는 `[redacted]`로 마스킹
+- UDP/TCP/TLS 수신/응답 로그가 모두 같은 정책을 따르도록 정리
+- `sanitizeSipForLog()` 유틸과 회귀 테스트 추가
+
+## 2026-04-05 Logger flush 정책 개선
+
+- `Logger`의 파일 출력이 매 라인마다 `flush()`하던 방식에서 배치 flush 방식으로 변경
+- 기본값은 `16`라인마다 flush하며, `ERROR` 로그는 즉시 flush
+- `shutdown()`과 파일 rotation 시점에는 남은 버퍼를 정리하도록 유지
+- 환경변수 `SIPLITE_LOG_FLUSH_EVERY`로 flush 주기 조정 가능
+  - `1`이면 기존과 같은 거의 즉시 flush
+  - `0`은 `1`로 취급
+  - 과도한 값은 내부 상한으로 제한
+- 관련 회귀 테스트 추가 및 기존 `test_logger` 시나리오를 배치 flush 기준으로 정리
+
 ## 별도 확인 필요 항목
 
-- hostname verification 미구현
+- DNS hostname 기반 certificate name verification은 아직 미구현
 - Linphone 실제 TLS 등록/호 설정/종료 상호운용 검증 필요

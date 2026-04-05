@@ -20,6 +20,7 @@ struct TcpConnection
     uint16_t remotePort = 0;
     std::string recvBuffer;     // 수신 버퍼 (스트림 프레이밍용)
     std::chrono::steady_clock::time_point lastActive;
+    std::shared_ptr<std::mutex> ioMutex = std::make_shared<std::mutex>();
 };
 
 class TcpServer
