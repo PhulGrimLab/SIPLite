@@ -25,6 +25,7 @@ struct TerminalConfig
     std::string contact;
     std::string ip;
     uint16_t port = 5060;
+    TransportType transport = TransportType::UDP;
     int expiresSec = 3600;
     std::string password;
     std::string description;
@@ -134,6 +135,7 @@ public:
             config.aor = extractTag(terminalBlock, "aor");
             config.contact = extractTag(terminalBlock, "contact");
             config.ip = extractTag(terminalBlock, "ip");
+            const std::string transportStr = extractTag(terminalBlock, "transport");
             config.password = extractTag(terminalBlock, "password");
             config.description = extractTag(terminalBlock, "description");
             
@@ -157,6 +159,14 @@ public:
             if (!config.contact.empty() && !isValidContact(config.contact))
             {
                 std::cerr << "[XmlConfigLoader] 잘못된 Contact: " << sanitizeForDisplay(config.contact, 100, '?', false) << "\n";
+                pos = termEnd + 11;
+                continue;
+            }
+
+            if (!transportStr.empty() && !parseTransport(transportStr, config.transport))
+            {
+                std::cerr << "[XmlConfigLoader] 잘못된 transport: "
+                          << sanitizeForDisplay(transportStr, 100, '?', false) << "\n";
                 pos = termEnd + 11;
                 continue;
             }
@@ -205,7 +215,7 @@ public:
         {
             if (sipCore.registerTerminal(term.aor, term.contact, 
                                           term.ip, term.port, term.expiresSec,
-                                          term.password))
+                                          term.password, term.transport))
             {
                 ++count;
                 std::cout << "  - 등록: " << sanitizeForDisplay(term.aor, 100, '?', false);
@@ -529,6 +539,27 @@ private:
             outExpires = val;
         }
         return true;
+    }
+
+    static bool parseTransport(const std::string& transportStr, TransportType& outTransport)
+    {
+        const std::string normalized = toLower(trim(transportStr));
+        if (normalized == "udp")
+        {
+            outTransport = TransportType::UDP;
+            return true;
+        }
+        if (normalized == "tcp")
+        {
+            outTransport = TransportType::TCP;
+            return true;
+        }
+        if (normalized == "tls")
+        {
+            outTransport = TransportType::TLS;
+            return true;
+        }
+        return false;
     }
 
     // XML 태그 추출 (최적화된 버전 - 정규식 없이, 엔티티 디코딩 포함)

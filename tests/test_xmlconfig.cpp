@@ -105,6 +105,35 @@ void test_load_xml_default_port()
     PASS();
 }
 
+void test_load_xml_transport()
+{
+    TEST("Load XML with explicit transport");
+    ensureTestDir();
+    std::string path = TEST_DIR + "/transport.xml";
+    std::string xml =
+        "<terminals>\n"
+        "  <terminal>\n"
+        "    <aor>sip:1001@server</aor>\n"
+        "    <ip>10.0.0.1</ip>\n"
+        "    <transport>tls</transport>\n"
+        "  </terminal>\n"
+        "  <terminal>\n"
+        "    <aor>sip:1002@server</aor>\n"
+        "    <ip>10.0.0.2</ip>\n"
+        "    <transport>tcp</transport>\n"
+        "  </terminal>\n"
+        "</terminals>\n";
+    writeFile(path, xml);
+
+    auto terminals = XmlConfigLoader::loadTerminals(path);
+    assert(terminals.size() == 2);
+    assert(terminals[0].transport == TransportType::TLS);
+    assert(terminals[1].transport == TransportType::TCP);
+
+    cleanupFile(path);
+    PASS();
+}
+
 // ================================
 // 2) 빈 파일 / 존재하지 않는 파일
 // ================================
@@ -387,6 +416,35 @@ void test_zero_port_rejected()
     PASS();
 }
 
+void test_invalid_transport_skipped()
+{
+    TEST("Invalid transport skipped");
+    ensureTestDir();
+    std::string path = TEST_DIR + "/badtransport.xml";
+    std::string xml =
+        "<terminals>\n"
+        "  <terminal>\n"
+        "    <aor>sip:1001@server</aor>\n"
+        "    <ip>10.0.0.1</ip>\n"
+        "    <transport>ws</transport>\n"
+        "  </terminal>\n"
+        "  <terminal>\n"
+        "    <aor>sip:1002@server</aor>\n"
+        "    <ip>10.0.0.2</ip>\n"
+        "    <transport>tls</transport>\n"
+        "  </terminal>\n"
+        "</terminals>\n";
+    writeFile(path, xml);
+
+    auto terminals = XmlConfigLoader::loadTerminals(path);
+    assert(terminals.size() == 1);
+    assert(terminals[0].aor == "sip:1002@server");
+    assert(terminals[0].transport == TransportType::TLS);
+
+    cleanupFile(path);
+    PASS();
+}
+
 // ================================
 // 8) registerTerminals (SipCore 등록)
 // ================================
@@ -409,6 +467,7 @@ void test_registerTerminals_to_sipcore()
         "    <contact>sip:1002@10.0.0.2:5060</contact>\n"
         "    <ip>10.0.0.2</ip>\n"
         "    <port>5060</port>\n"
+        "    <transport>tls</transport>\n"
         "  </terminal>\n"
         "</terminals>\n";
     writeFile(path, xml);
@@ -428,6 +487,7 @@ void test_registerTerminals_to_sipcore()
     auto reg2 = core.findRegistrationSafe("sip:1002@server");
     assert(reg2.has_value());
     assert(reg2->ip == "10.0.0.2");
+    assert(reg2->transport == TransportType::TLS);
 
     cleanupFile(path);
     PASS();
@@ -706,6 +766,7 @@ int main()
     std::cout << "[Section 1] Valid XML loading\n";
     test_load_valid_xml();
     test_load_xml_default_port();
+    test_load_xml_transport();
 
     std::cout << "\n[Section 2] Missing/empty files\n";
     test_load_nonexistent_file();
@@ -732,6 +793,7 @@ int main()
     std::cout << "\n[Section 7] Invalid port\n";
     test_invalid_port_uses_default();
     test_zero_port_rejected();
+    test_invalid_transport_skipped();
 
     std::cout << "\n[Section 8] registerTerminals\n";
     test_registerTerminals_to_sipcore();

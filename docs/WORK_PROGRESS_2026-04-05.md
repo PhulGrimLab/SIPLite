@@ -92,6 +92,21 @@ TLS가 "코드가 존재하는 수준"인지, 아니면 실제 SIP 라우팅에 
   - `SIPLITE_TLS_CERT_DAYS`
 - 결과적으로 개발 환경에서는 `make all && make run`만으로 TLS 리스너가 바로 올라오는 흐름 확보
 
+## 2026-04-05 XML transport 설정 반영
+
+- `config/terminals.xml`에서 `<transport>` 태그를 읽도록 확장
+- 지원 값:
+  - `udp`
+  - `tcp`
+  - `tls`
+- `XmlConfigLoader`가 파싱한 transport를 `SipCore::registerTerminal()`에 전달하도록 수정
+- 따라서 실제 REGISTER 없이도 XML 기반 정적 등록 단말을 TLS/TCP/UDP로 명시 가능
+- 기본 샘플 `config/terminals.xml`은 TLS 테스트 흐름에 맞춰 각 단말을 `tls`로 표기
+- 회귀 테스트 추가:
+  - transport 파싱 성공
+  - 잘못된 transport 값 거부
+  - `registerTerminals()` 이후 `Registration.transport` 반영 확인
+
 ## 별도 확인 필요 항목
 
 - hostname verification 미구현
