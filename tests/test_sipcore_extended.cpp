@@ -23,7 +23,7 @@ static int testsFailed = 0;
 #define FAIL(reason) \
     do { std::cout << "FAILED: " << reason << "\n"; ++testsFailed; } while(0)
 
-struct SentMsg { std::string ip; uint16_t port; std::string data; };
+struct SentMsg { std::string ip; uint16_t port; std::string data; TransportType transport; };
 
 // ================================
 // Helper: 공통 SipCore 생성 + sender 설치
@@ -31,11 +31,25 @@ struct SentMsg { std::string ip; uint16_t port; std::string data; };
 static std::unique_ptr<SipCore> createCoreWithSender(std::vector<SentMsg>& sent)
 {
     auto core = std::make_unique<SipCore>();
-    core->setSender([&sent](const std::string& ip, uint16_t port, const std::string& data) -> bool {
-        sent.push_back({ip, port, data});
+    core->setSender([&sent](const std::string& ip, uint16_t port, const std::string& data, TransportType transport) -> bool {
+        sent.push_back({ip, port, data, transport});
         return true;
     });
     return core;
+}
+
+static std::string viaToken(TransportType transport)
+{
+    switch (transport)
+    {
+    case TransportType::TCP:
+        return "TCP";
+    case TransportType::TLS:
+        return "TLS";
+    case TransportType::UDP:
+    default:
+        return "UDP";
+    }
 }
 
 // Helper: 단말 사전 등록 (XML 설정 대체) — handleRegister는 isStatic 단말만 허용
@@ -53,11 +67,12 @@ static std::string makeRegister(const std::string& aor,
                                  const std::string& callId,
                                  int cseq,
                                  const std::string& expires,
-                                 const std::string& fromTag = "tag1")
+                                 const std::string& fromTag = "tag1",
+                                 TransportType transport = TransportType::UDP)
 {
     std::string raw =
         "REGISTER sip:server SIP/2.0\r\n"
-        "Via: SIP/2.0/UDP client:5060\r\n"
+        "Via: SIP/2.0/" + viaToken(transport) + " client:5060\r\n"
         "From: <" + aor + ">;tag=" + fromTag + "\r\n"
         "To: <" + aor + ">\r\n"
         "Call-ID: " + callId + "\r\n"
@@ -124,13 +139,14 @@ static void preRegisterAndLogin(SipCore& core, std::vector<SentMsg>& sent,
                                 const std::string& contact,
                                 const std::string& ip, uint16_t port,
                                 const std::string& callId = "pre-reg",
-                                int cseq = 1)
+                                int cseq = 1,
+                                TransportType transport = TransportType::UDP)
 {
     preRegister(core, aor, contact, ip, port);
-    std::string regRaw = makeRegister(aor, contact, callId, cseq, "3600");
+    std::string regRaw = makeRegister(aor, contact, callId, cseq, "3600", "tag1", transport);
     SipMessage msg;
     parseSipMessage(regRaw, msg);
-    UdpPacket pkt{ip, port, regRaw};
+    UdpPacket pkt{ip, port, regRaw, transport};
     std::string resp;
     core.handlePacket(pkt, msg, resp);
     (void)sent;
@@ -616,6 +632,40 @@ void test_registerTerminal_invalid_params()
     // assert(!core->registerTerminal("sip:user@server", "contact", "", 5060));
 
     assert(core->registrationCount() == 0);
+    PASS();
+}
+
+void test_tls_registration_transport_is_preserved()
+{
+    TEST("TLS registration preserves transport for forwarded INVITE");
+    std::vector<SentMsg> sent;
+    auto core = createCoreWithSender(sent);
+
+    preRegister(*core, "sip:tls1@server", "<sips:tls1@10.0.0.10:5061>", "10.0.0.10", 5061);
+
+    std::string regRaw = makeRegister("sip:tls1@server", "<sips:tls1@10.0.0.10:5061>",
+                                      "tls-reg", 1, "3600", "tls-tag", TransportType::TLS);
+    SipMessage regMsg;
+    assert(parseSipMessage(regRaw, regMsg));
+    UdpPacket regPkt{"10.0.0.10", 5061, regRaw, TransportType::TLS};
+    std::string resp;
+    core->handlePacket(regPkt, regMsg, resp);
+
+    auto reg = core->findRegistrationSafe("sip:tls1@server");
+    assert(reg.has_value());
+    assert(reg->transport == TransportType::TLS);
+
+    std::string invRaw = makeInvite("sip:tls1@server", "sip:caller@client", "tls-call", 1);
+    SipMessage invMsg;
+    assert(parseSipMessage(invRaw, invMsg));
+    UdpPacket invPkt{"10.0.0.20", 5060, invRaw, TransportType::UDP};
+    core->handlePacket(invPkt, invMsg, resp);
+
+    assert(sent.size() >= 2);
+    const SentMsg& forwardedInvite = sent.back();
+    assert(forwardedInvite.ip == "10.0.0.10");
+    assert(forwardedInvite.port == 5061);
+    assert(forwardedInvite.transport == TransportType::TLS);
     PASS();
 }
 
@@ -2665,6 +2715,7 @@ int main()
     test_register_max_expires_clamped();
     test_registerTerminal();
     test_registerTerminal_invalid_params();
+    test_tls_registration_transport_is_preserved();
 
     std::cout << "\n[Section 2] INVITE\n";
     test_invite_to_unregistered_user();

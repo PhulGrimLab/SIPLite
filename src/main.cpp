@@ -186,12 +186,15 @@ int main(int argc, char* argv[])
     // 전송 프로토콜 라우팅 콜백 설정
     // TLS 연결이 있으면 TLS로, 없으면 TCP, 마지막으로 UDP로 전송
     udpServer.sipCore().setSender(
-        [&udpServer, &tcpServer, &tlsServer, &tlsStarted](const std::string& ip, uint16_t port, const std::string& data) -> bool {
-            if (tlsStarted && tlsServer.hasConnection(ip, port))
+        [&udpServer, &tcpServer, &tlsServer, &tlsStarted](const std::string& ip,
+                                                          uint16_t port,
+                                                          const std::string& data,
+                                                          TransportType transport) -> bool {
+            if (transport == TransportType::TLS)
             {
-                return tlsServer.sendTo(ip, port, data);
+                return tlsStarted && tlsServer.sendTo(ip, port, data);
             }
-            if (tcpServer.hasConnection(ip, port))
+            if (transport == TransportType::TCP)
             {
                 return tcpServer.sendTo(ip, port, data);
             }

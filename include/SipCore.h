@@ -134,6 +134,7 @@ struct Registration
     std::string contact;    // "sip:1001@client-ip:port"
     std::string ip;         // 실제 패킷 src IP
     uint16_t    port = 0;   // 실제 패킷 src Port
+    TransportType transport = TransportType::UDP;
     std::string authPassword; // REGISTER Digest 검증용 평문 비밀번호
 
     /* 만료시간 변수 설명 📅
@@ -219,7 +220,7 @@ public:
     호출(예):
     sender_(pkt.remoteIp, pkt.remotePort, buildSimpleResponse(msg,100,"Trying")); — SipCore::handleInvite/handleResponse 등
     */
-    using SenderFn = std::function<bool(const std::string&, uint16_t, const std::string&)>;
+    using SenderFn = std::function<bool(const std::string&, uint16_t, const std::string&, TransportType)>;
     /*
     코드 설명 
     std::function은 C++ 표준 라이브러리에서 제공하는 범용 함수 포인터 래퍼입니다.
@@ -306,8 +307,10 @@ public:
         std::string toTag;
         std::string callerIp;
         uint16_t callerPort = 0;
+        TransportType callerTransport = TransportType::UDP;
         std::string calleeIp;
         uint16_t calleePort = 0;
+        TransportType calleeTransport = TransportType::UDP;
         std::chrono::steady_clock::time_point startTime;
         bool confirmed = false;
         bool byeReceived = false;  // 첫 번째 BYE 수신 여부 (cross-BYE 처리용)
@@ -326,8 +329,10 @@ public:
         std::string calleeTag;   // remote tag from callee (To tag in 2xx)
         std::string callerIp;
         uint16_t callerPort = 0;
+        TransportType callerTransport = TransportType::UDP;
         std::string calleeIp;
         uint16_t calleePort = 0;
+        TransportType calleeTransport = TransportType::UDP;
         int cseq = 0;
         bool confirmed = false;  // true after ACK
         bool byeReceived = false;  // 첫 번째 BYE 수신 여부
@@ -536,8 +541,10 @@ public:
             std::string key;
             std::string callerIp;
             uint16_t callerPort;
+            TransportType callerTransport = TransportType::UDP;
             std::string calleeIp;
             uint16_t calleePort;
+            TransportType calleeTransport = TransportType::UDP;
             std::string resp408;      // caller에게 보낼 408
             std::string cancelMsg;    // callee에게 보낼 CANCEL
             std::string callId;
@@ -564,8 +571,10 @@ public:
                     entry.key = it->first;
                     entry.callerIp = it->second.callerIp;
                     entry.callerPort = it->second.callerPort;
+                    entry.callerTransport = it->second.callerTransport;
                     entry.calleeIp = it->second.calleeIp;
                     entry.calleePort = it->second.calleePort;
+                    entry.calleeTransport = it->second.calleeTransport;
 
                     // caller에게 보낼 408 — callerRequest(프록시 Via 없는 원본)로 생성
                     if (!it->second.callerRequest.empty())
@@ -613,9 +622,9 @@ public:
             if (sender_)
             {
                 if (!e.resp408.empty())
-                    sender_(e.callerIp, e.callerPort, e.resp408);
+                    sender_(e.callerIp, e.callerPort, e.resp408, e.callerTransport);
                 if (!e.cancelMsg.empty())
-                    sender_(e.calleeIp, e.calleePort, e.cancelMsg);
+                    sender_(e.calleeIp, e.calleePort, e.cancelMsg, e.calleeTransport);
             }
             Logger::instance().info("[Timer C] INVITE timeout: key=" + e.key
                 + " → 408 to caller " + e.callerIp + ":" + std::to_string(e.callerPort)
@@ -652,6 +661,7 @@ public:
         std::string toTag;          // 서버가 생성한 To tag
         std::string subscriberIp;   // 구독자 IP
         uint16_t subscriberPort = 0;
+        TransportType subscriberTransport = TransportType::UDP;
         std::string contact;        // 구독자 Contact URI
         int cseq = 0;               // 마지막 CSeq 번호 (NOTIFY 전송용)
         std::chrono::steady_clock::time_point expiresAt;
@@ -678,6 +688,7 @@ public:
             std::string key;
             std::string subscriberIp;
             uint16_t subscriberPort;
+            TransportType subscriberTransport = TransportType::UDP;
             std::string notifyMsg;
         };
         std::vector<ExpiredSub> expired;
@@ -693,6 +704,7 @@ public:
                     entry.key = it->first;
                     entry.subscriberIp = it->second.subscriberIp;
                     entry.subscriberPort = it->second.subscriberPort;
+                    entry.subscriberTransport = it->second.subscriberTransport;
                     entry.notifyMsg = buildNotifyUnlocked_(it->first, "terminated;reason=timeout");
                     expired.push_back(std::move(entry));
 
@@ -713,7 +725,7 @@ public:
         {
             if (sender_)
             {
-                sender_(e.subscriberIp, e.subscriberPort, e.notifyMsg);
+                sender_(e.subscriberIp, e.subscriberPort, e.notifyMsg, e.subscriberTransport);
             }
             Logger::instance().info("[Subscription] Expired: key=" + e.key);
         }
@@ -743,7 +755,14 @@ public:
     void notifySubscribers(const std::string& aor, const std::string& body,
                            const std::string& contentType)
     {
-        std::vector<std::pair<std::string, std::string>> toSend; // {ip:port, notify}
+        struct PendingNotify
+        {
+            std::string ip;
+            uint16_t port = 0;
+            std::string notify;
+            TransportType transport = TransportType::UDP;
+        };
+        std::vector<PendingNotify> toSend;
         std::string user = extractUserFromUri(aor);
 
         {
@@ -755,23 +774,21 @@ public:
                     && sub.state == Subscription::State::ACTIVE
                     && sub.expiresAt > now)
                 {
-                    std::string notify = buildNotifyUnlocked_(key, "active", body, contentType);
-                    toSend.emplace_back(
-                        sub.subscriberIp + ":" + std::to_string(sub.subscriberPort),
-                        std::move(notify));
+                    PendingNotify entry;
+                    entry.ip = sub.subscriberIp;
+                    entry.port = sub.subscriberPort;
+                    entry.transport = sub.subscriberTransport;
+                    entry.notify = buildNotifyUnlocked_(key, "active", body, contentType);
+                    toSend.push_back(std::move(entry));
                 }
             }
         }
 
         if (sender_)
         {
-            for (const auto& [addr, notify] : toSend)
+            for (const auto& entry : toSend)
             {
-                auto colonPos = addr.find(':');
-                std::string ip = addr.substr(0, colonPos);
-                uint16_t port = static_cast<uint16_t>(
-                    std::stoi(addr.substr(colonPos + 1)));
-                sender_(ip, port, notify);
+                sender_(entry.ip, entry.port, entry.notify, entry.transport);
             }
         }
     }
@@ -844,7 +861,8 @@ public:
                           const std::string& ip,
                           uint16_t port,
                           int expiresSec = SipConstants::DEFAULT_EXPIRES_SEC,
-                          const std::string& authPassword = "")
+                          const std::string& authPassword = "",
+                          TransportType transport = TransportType::UDP)
     {
         if (aor.empty())
         {
@@ -866,6 +884,7 @@ public:
         reg.contact = contact.empty() ? aor : contact;
         reg.ip = ip;
         reg.port = port;
+        reg.transport = transport;
         reg.authPassword = authPassword;
         reg.expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(expiresSec);
         reg.isStatic = true;  // XML 설정으로 등록된 단말
@@ -1099,8 +1118,10 @@ private:
     {
         std::string callerIp;
         uint16_t callerPort = 0;
+        TransportType callerTransport = TransportType::UDP;
         std::string calleeIp;          // 수신자 IP (INVITE 전달 대상)
         uint16_t calleePort = 0;       // 수신자 Port
+        TransportType calleeTransport = TransportType::UDP;
         std::string origRequest;       // 프록시 Via가 추가된 INVITE (callee에게 전달된 버전) — CANCEL/ACK 생성용
         std::string callerRequest;     // caller의 원본 INVITE (프록시 Via 없음) — 487 응답 생성용
         std::string callerContact;     // caller's Contact URI (from INVITE Contact header)

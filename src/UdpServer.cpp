@@ -136,7 +136,7 @@ bool UdpServer::start(const std::string& ip, uint16_t port, std::size_t workerCo
     }
 
     // SIP 코어에 송신 콜백 설정
-    sipCore_.setSender([this](const std::string& ip, uint16_t port, const std::string& data){
+    sipCore_.setSender([this](const std::string& ip, uint16_t port, const std::string& data, TransportType){
         return this->sendTo(ip, port, data);
     });
 

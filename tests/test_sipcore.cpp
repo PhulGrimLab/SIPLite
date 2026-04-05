@@ -5,7 +5,7 @@
 #include <iostream>
 #include <vector>
 
-struct SentMsg { std::string ip; uint16_t port; std::string data; };
+struct SentMsg { std::string ip; uint16_t port; std::string data; TransportType transport; };
 
 namespace
 {
@@ -26,8 +26,8 @@ int main()
     SipCore core;
     std::vector<SentMsg> sent;
 
-    core.setSender([&sent](const std::string& ip, uint16_t port, const std::string& data)->bool{
-        sent.push_back({ip, port, data});
+    core.setSender([&sent](const std::string& ip, uint16_t port, const std::string& data, TransportType transport)->bool{
+        sent.push_back({ip, port, data, transport});
         return true;
     });
 

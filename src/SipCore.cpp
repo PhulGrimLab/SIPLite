@@ -402,10 +402,12 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
     // Collect info to send outside locks
     std::string fwdIp;
     uint16_t fwdPort = 0;
+    TransportType fwdTransport = TransportType::UDP;
     std::string fwdData;
     std::string ackData;
     std::string ackIp;
     uint16_t ackPort = 0;
+    TransportType ackTransport = TransportType::UDP;
 
     {
         // 올바른 뮤텍스 순서: callMutex_ → pendingInvMutex_ → dlgMutex_
@@ -437,6 +439,7 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
             {
                 ackIp = pkt.remoteIp;
                 ackPort = pkt.remotePort;
+                ackTransport = pkt.transport;
                 ackData = std::move(ack);
             }
             // fwdData는 비워둠 — caller에게 재전달하지 않음 (이미 첫 응답에서 전달 완료)
@@ -448,6 +451,7 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
         // 프록시가 추가한 Via를 제거하여 caller에게 전달 (RFC 3261 §16.7)
         fwdIp = it->second.callerIp;
         fwdPort = it->second.callerPort;
+        fwdTransport = it->second.callerTransport;
         fwdData = removeTopVia(pkt.data);
 
         // 상태 코드에 따라 트랜잭션 상태 업데이트
@@ -499,8 +503,10 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
                         dlg.calleeTag = extractTagFromHeader(toHdr);
                         dlg.callerIp = it->second.callerIp;
                         dlg.callerPort = it->second.callerPort;
+                        dlg.callerTransport = it->second.callerTransport;
                         dlg.calleeIp = pkt.remoteIp;
                         dlg.calleePort = pkt.remotePort;
+                        dlg.calleeTransport = pkt.transport;
                         dlg.cseq = cseqNum;
                         dlg.created = std::chrono::steady_clock::now();
                         dlg.confirmed = false;
@@ -548,6 +554,7 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
                         {
                             ackIp = pkt.remoteIp;
                             ackPort = pkt.remotePort;
+                            ackTransport = pkt.transport;
                             // ACK 메시지를 생성하여 ackData에 저장한다.
                             ackData = std::move(ack);
                         }
@@ -565,6 +572,7 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
                 {
                     ackIp = pkt.remoteIp;
                     ackPort = pkt.remotePort;
+                    ackTransport = pkt.transport;
                     // ACK 메시지를 생성하여 ackData에 저장한다.
                     ackData = std::move(ack);
                 }
@@ -591,13 +599,13 @@ bool SipCore::handleResponse(const UdpPacket& pkt, const SipMessage& msg)
         // 따라서, fwdData와 ackData가 모두 존재하는 경우에는 원본 응답 메시지와 ACK 메시지를 모두 전송할 수 있도록 한다.
         if (!fwdData.empty())
         {
-            sender_(fwdIp, fwdPort, fwdData);
+            sender_(fwdIp, fwdPort, fwdData, fwdTransport);
         }
 
         // ACK는 SIP 흐름 관리에 필요한 경우에만 생성되므로, ackData가 존재하는 경우에만 전송한다.
         if (!ackData.empty())
         {
-            sender_(ackIp, ackPort, ackData);
+            sender_(ackIp, ackPort, ackData, ackTransport);
         }
     }
 
@@ -866,10 +874,12 @@ bool SipCore::handleRegister(const UdpPacket& pkt,
     reg.contact  = contactHdr;
     reg.ip       = pkt.remoteIp;
     reg.port     = pkt.remotePort;
+    reg.transport = pkt.transport;
+    reg.authPassword = staticReg.authPassword;
     reg.expiresAt = std::chrono::steady_clock::now() +
                     std::chrono::seconds(expiresSec);
     reg.loggedIn = true;
-    reg.isStatic = true;  // 여기에 도달하는 단말은 항상 isStatic
+    reg.isStatic = staticReg.isStatic;
 
     {
         std::lock_guard<std::mutex> lock(regMutex_);
@@ -993,7 +1003,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     {
         if (sender_ && !retransmitData.empty())
         {
-            sender_(pkt.remoteIp, pkt.remotePort, retransmitData);
+            sender_(pkt.remoteIp, pkt.remotePort, retransmitData, pkt.transport);
         }
         return true;
     }
@@ -1003,7 +1013,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
     // 100 Trying은 새로운 INVITE에 대해서만 전송
     if (sender_)
     {
-        sender_(pkt.remoteIp, pkt.remotePort, buildSimpleResponse(msg, 100, "Trying"));
+        sender_(pkt.remoteIp, pkt.remotePort, buildSimpleResponse(msg, 100, "Trying"), pkt.transport);
     }
     else
     {
@@ -1051,8 +1061,10 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         call.toTag = toTag;
         call.callerIp = pkt.remoteIp;
         call.callerPort = pkt.remotePort;
+        call.callerTransport = pkt.transport;
         call.calleeIp = regCopy.ip;
         call.calleePort = regCopy.port;
+        call.calleeTransport = regCopy.transport;
         call.startTime = std::chrono::steady_clock::now();
         call.confirmed = false;
         activeCalls_[callId] = call;
@@ -1060,6 +1072,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
         PendingInvite pi;
         pi.callerIp = pkt.remoteIp;
         pi.callerPort = pkt.remotePort;
+        pi.callerTransport = pkt.transport;
         pi.calleeIp = regCopy.ip;
         // caller의 Contact URI 저장 (BYE 전달 시 Request-URI 재작성용)
         {
@@ -1067,6 +1080,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
             pi.callerContact = extractUriFromHeader(callerContactHdr);
         }
         pi.calleePort = regCopy.port;
+        pi.calleeTransport = regCopy.transport;
         // 프록시 Via가 추가된 버전을 저장하여, CANCEL/ACK 생성 시 callee가 받은 Via와 일치하도록 함
         pi.origRequest = fwdInvite;
         // caller의 원본 INVITE를 저장하여, 487 응답 생성 시 프록시 Via 없는 버전을 사용
@@ -1109,7 +1123,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
             // caller에게 487 응답만 전송
             if (!resp487ForCaller.empty())
             {
-                sender_(pkt.remoteIp, pkt.remotePort, resp487ForCaller);
+                sender_(pkt.remoteIp, pkt.remotePort, resp487ForCaller, pkt.transport);
             }
         }
 
@@ -1119,7 +1133,7 @@ bool SipCore::handleInvite(const UdpPacket& pkt,
 
     if (sender_)
     {
-        sender_(regCopy.ip, regCopy.port, fwdInvite);
+        sender_(regCopy.ip, regCopy.port, fwdInvite, regCopy.transport);
     }
 
     // 프록시는 180 Ringing을 직접 생성하지 않음 — callee의 provisional 응답이
@@ -1156,6 +1170,7 @@ bool SipCore::handleAck(const UdpPacket& pkt,
     // Capture callee info under lock, send outside
     std::string ackFwdIp;
     uint16_t ackFwdPort = 0;
+    TransportType ackFwdTransport = TransportType::UDP;
     {
         std::lock_guard<std::mutex> lockCall(callMutex_);
         std::lock_guard<std::mutex> lockPend(pendingInvMutex_);
@@ -1175,6 +1190,7 @@ bool SipCore::handleAck(const UdpPacket& pkt,
                 it->second.confirmed = true;
                 ackFwdIp = it->second.calleeIp;
                 ackFwdPort = it->second.calleePort;
+                ackFwdTransport = it->second.calleeTransport;
             }
             else if (side == DialogPeerSide::Callee)
             {
@@ -1209,7 +1225,7 @@ bool SipCore::handleAck(const UdpPacket& pkt,
         std::string fwdAck = addProxyVia(pkt.data, pkt.transport);
         fwdAck = decrementMaxForwards(fwdAck);
         fwdAck = stripOwnRoute(fwdAck, pkt.transport);
-        sender_(ackFwdIp, ackFwdPort, fwdAck);
+        sender_(ackFwdIp, ackFwdPort, fwdAck, ackFwdTransport);
     }
 
     // SIP ACK 요청은 일반적으로 SIP 흐름 관리에 필요한 처리를 수행한 후, 
@@ -1245,6 +1261,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
     bool isSameDirRetransmit = false; // 같은 방향 BYE 재전송 (UDP)
     std::string fwdIp;
     uint16_t fwdPort = 0;
+    TransportType fwdTransport = TransportType::UDP;
     std::string fwdContactUri;  // 상대방의 Contact URI (Request-URI 재작성용)
     {
         // 올바른 뮤텍스 순서로 동시에 잠금
@@ -1263,6 +1280,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                 // caller가 BYE 보냄 → callee에게 전달
                 fwdIp = dit->second.calleeIp;
                 fwdPort = dit->second.calleePort;
+                fwdTransport = dit->second.calleeTransport;
                 fwdContactUri = dit->second.remoteTarget;  // callee의 Contact URI
             }
             else if (side == DialogPeerSide::Callee)
@@ -1271,6 +1289,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                 // callee가 BYE 보냄 → caller에게 전달
                 fwdIp = dit->second.callerIp;
                 fwdPort = dit->second.callerPort;
+                fwdTransport = dit->second.callerTransport;
                 fwdContactUri = dit->second.callerContact; // caller의 Contact URI
             }
 
@@ -1311,12 +1330,14 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                     found = true;
                     fwdIp = it->second.calleeIp;
                     fwdPort = it->second.calleePort;
+                    fwdTransport = it->second.calleeTransport;
                 }
                 else if (side == DialogPeerSide::Callee)
                 {
                     found = true;
                     fwdIp = it->second.callerIp;
                     fwdPort = it->second.callerPort;
+                    fwdTransport = it->second.callerTransport;
                 }
             }
 
@@ -1391,7 +1412,7 @@ bool SipCore::handleBye(const UdpPacket& pkt,
                 + " to=" + fwdIp + ":" + std::to_string(fwdPort)
                 + " contactUri=" + (fwdContactUri.empty() ? "(none)" : fwdContactUri));
 
-            sender_(fwdIp, fwdPort, fwdBye);
+            sender_(fwdIp, fwdPort, fwdBye, fwdTransport);
         }
     }
     else
@@ -1436,6 +1457,7 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
     // Collect data under locks (correct order: callMutex_ -> pendingInvMutex_ -> dlgMutex_)
     std::string calleeIp;
     uint16_t calleePort = 0;
+    TransportType calleeTransport = TransportType::UDP;
     std::string cancelRaw;
     bool foundPending = false;
 
@@ -1464,6 +1486,7 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
                 // PendingInvite에서 callee 정보 가져오기
                 calleeIp = pit->second.calleeIp;
                 calleePort = pit->second.calleePort;
+                calleeTransport = pit->second.calleeTransport;
 
                 // callee에게 전달할 CANCEL 생성
                 cancelRaw = buildCancelForPending(pit->second);
@@ -1498,7 +1521,7 @@ bool SipCore::handleCancel(const UdpPacket& pkt,
         if (!cancelRaw.empty() && !calleeIp.empty())
         {
             // callee에게 CANCEL 전달
-            sender_(calleeIp, calleePort, cancelRaw);
+            sender_(calleeIp, calleePort, cancelRaw, calleeTransport);
             Logger::instance().info("[handleCancel] CANCEL forwarded to callee: "
                 + calleeIp + ":" + std::to_string(calleePort) + " key=" + key);
         }
@@ -1579,18 +1602,21 @@ bool SipCore::handleMessage(const UdpPacket& pkt,
         {
             std::string fwdIp;
             uint16_t fwdPort = 0;
+            TransportType fwdTransport = TransportType::UDP;
             std::string fwdContactUri;
             DialogPeerSide side = classifyDialogPeerSide(dit->second, nullptr, msg, pkt);
             if (side == DialogPeerSide::Caller)
             {
                 fwdIp = dit->second.calleeIp;
                 fwdPort = dit->second.calleePort;
+                fwdTransport = dit->second.calleeTransport;
                 fwdContactUri = dit->second.remoteTarget;
             }
             else if (side == DialogPeerSide::Callee)
             {
                 fwdIp = dit->second.callerIp;
                 fwdPort = dit->second.callerPort;
+                fwdTransport = dit->second.callerTransport;
                 fwdContactUri = dit->second.callerContact;
             }
 
@@ -1605,7 +1631,7 @@ bool SipCore::handleMessage(const UdpPacket& pkt,
                     fwdMsg = rewriteRequestUri(fwdMsg, fwdContactUri);
                 }
 
-                sender_(fwdIp, fwdPort, fwdMsg);
+                sender_(fwdIp, fwdPort, fwdMsg, fwdTransport);
 
                 Logger::instance().info("[handleMessage] In-dialog MESSAGE forwarded: callId=" + callId
                     + " to=" + fwdIp + ":" + std::to_string(fwdPort));
@@ -1665,7 +1691,7 @@ bool SipCore::handleMessage(const UdpPacket& pkt,
 
     if (sender_)
     {
-        sender_(regCopy.ip, regCopy.port, fwdMsg);
+        sender_(regCopy.ip, regCopy.port, fwdMsg, regCopy.transport);
     }
 
     outResponse = buildSimpleResponse(msg, 200, "OK");
@@ -1780,7 +1806,7 @@ bool SipCore::handleSubscribe(const UdpPacket& pkt,
         // NOTIFY(terminated) 전송
         if (sender_ && !notifyMsg.empty())
         {
-            sender_(pkt.remoteIp, pkt.remotePort, notifyMsg);
+            sender_(pkt.remoteIp, pkt.remotePort, notifyMsg, pkt.transport);
         }
 
         // 200 OK with Expires: 0
@@ -1812,6 +1838,10 @@ bool SipCore::handleSubscribe(const UdpPacket& pkt,
         if (it != subscriptions_.end())
         {
             // 기존 구독 갱신 (refresh)
+            it->second.subscriberIp = pkt.remoteIp;
+            it->second.subscriberPort = pkt.remotePort;
+            it->second.subscriberTransport = pkt.transport;
+            it->second.contact = contactUri;
             it->second.expiresAt = std::chrono::steady_clock::now()
                 + std::chrono::seconds(expiresSec);
             it->second.cseq = cseqNum;
@@ -1836,6 +1866,7 @@ bool SipCore::handleSubscribe(const UdpPacket& pkt,
             sub.toTag = generateTag();
             sub.subscriberIp = pkt.remoteIp;
             sub.subscriberPort = pkt.remotePort;
+            sub.subscriberTransport = pkt.transport;
             sub.contact = contactUri;
             sub.cseq = cseqNum;
             sub.expiresAt = std::chrono::steady_clock::now()
@@ -1876,7 +1907,7 @@ bool SipCore::handleSubscribe(const UdpPacket& pkt,
     if (sender_)
     {
         std::string notifyMsg = buildNotify(callId, "active");
-        sender_(pkt.remoteIp, pkt.remotePort, notifyMsg);
+        sender_(pkt.remoteIp, pkt.remotePort, notifyMsg, pkt.transport);
     }
 
     Logger::instance().info("[handleSubscribe] Subscribed: callId=" + callId
@@ -1924,6 +1955,7 @@ bool SipCore::handleNotify(const UdpPacket& pkt,
     bool subFound = false;
     std::string subscriberIp;
     uint16_t subscriberPort = 0;
+    TransportType subscriberTransport = TransportType::UDP;
     {
         std::lock_guard<std::mutex> lock(subMutex_);
         auto it = subscriptions_.find(callId);
@@ -1932,6 +1964,7 @@ bool SipCore::handleNotify(const UdpPacket& pkt,
             subFound = true;
             subscriberIp = it->second.subscriberIp;
             subscriberPort = it->second.subscriberPort;
+            subscriberTransport = it->second.subscriberTransport;
 
             // Subscription-State 처리
             std::string stateLower = toLower(trim(subStateHdr));
@@ -1959,7 +1992,7 @@ bool SipCore::handleNotify(const UdpPacket& pkt,
         // notifier에서 온 NOTIFY를 subscriber에게 전달
         std::string fwdNotify = addProxyVia(pkt.data, pkt.transport);
         fwdNotify = decrementMaxForwards(fwdNotify);
-        sender_(subscriberIp, subscriberPort, fwdNotify);
+        sender_(subscriberIp, subscriberPort, fwdNotify, subscriberTransport);
 
         Logger::instance().info("[handleNotify] Forwarded NOTIFY: callId=" + callId
             + " to=" + subscriberIp + ":" + std::to_string(subscriberPort));
